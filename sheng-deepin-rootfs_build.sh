@@ -241,7 +241,17 @@ for MODE in "${BOOTMODES[@]}"; do
 
     # 5. Device quirks (shared with the other distro scripts)
     setup_getty_ttyMSM0 "$ROOTDIR"
+    # qrtr-ns: the unit the shared lib creates runs /usr/bin/qrtr-ns, which a
+    # stock Deepin rootfs lacks -> the unit fails at boot. Install the package
+    # (Debian: 'qrtr') if available, and add a ConditionPathExists safety net so
+    # the unit is skipped (not "failed") when the binary is still absent.
+    chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y qrtr" >/dev/null 2>&1 || true
     setup_qrtr_service "$ROOTDIR"
+    if [ ! -e "$ROOTDIR/usr/bin/qrtr-ns" ]; then
+        mkdir -p "$ROOTDIR/etc/systemd/system/qrtr-ns.service.d"
+        printf '[Unit]\nConditionPathExists=/usr/bin/qrtr-ns\n' \
+            > "$ROOTDIR/etc/systemd/system/qrtr-ns.service.d/10-skip-if-absent.conf"
+    fi
     configure_touchscreen "$ROOTDIR"
     fix_wifi_firmware "$ROOTDIR"
 
