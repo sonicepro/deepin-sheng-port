@@ -99,19 +99,50 @@ jobs:
             deepin-desktop "${{ inputs.kernel_version }}" "${{ inputs.boot_mode }}" dde
           ls -la ./*.7z
 
+      - name: Build boot images from the kernel .deb
+        run: |
+          set -euo pipefail
+          deb=$(ls linux-xiaomi-sheng*.deb | head -1)
+          [ -n "$deb" ] || { echo "ERROR: linux-xiaomi-sheng.deb not found"; ls -la; exit 1; }
+          rm -rf kdeb && mkdir kdeb
+          dpkg-deb -x "$deb" kdeb
+          payload=""
+          for c in kdeb/boot/Image.gz-dtb_sheng kdeb/boot/zImage_sheng; do
+            [ -f "$c" ] && payload="$c" && break
+          done
+          if [ -z "$payload" ]; then
+            [ -f kdeb/boot/Image.gz ] && [ -f kdeb/boot/sm8550-xiaomi-sheng.dtb ] \
+              || { echo "ERROR: kernel payload missing in deb"; find kdeb/boot -type f; exit 1; }
+            cat kdeb/boot/Image.gz kdeb/boot/sm8550-xiaomi-sheng.dtb > zImage_sheng
+            payload=zImage_sheng
+          fi
+          echo "==> kernel payload: $payload"
+          python3 mkbootimg --kernel "$payload" \
+            --cmdline "root=PARTLABEL=userdata rootwait rw fsck.repair=yes" \
+            --base 0x00000000 --kernel_offset 0x00008000 --tags_offset 0x01e00000 --pagesize 4096 \
+            -o boot_sheng_singleboot.img
+          python3 mkbootimg --kernel "$payload" \
+            --cmdline "root=PARTLABEL=linux rootwait rw fsck.repair=yes" \
+            --base 0x00000000 --kernel_offset 0x00008000 --tags_offset 0x01e00000 --pagesize 4096 \
+            -o boot_sheng_dualboot.img
+          ls -la boot_sheng_*.img
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: deepin25-rootfs-${{ inputs.boot_mode }}
-          path: "*.7z"
+          path: |
+            *.7z
+            boot_sheng_*.img
           retention-days: 7
           if-no-files-found: error
 
-      - name: Split images for GitHub release (<2 GiB per asset)
+      - name: Stage release assets (split >2 GiB, add boot images)
         run: |
           set -euo pipefail
           shopt -s nullglob
           mkdir -p release
+          cp boot_sheng_*.img release/ 2>/dev/null || true
           for f in *.7z; do
             sz=$(stat -c %s "$f")
             if [ "$sz" -gt 2000000000 ]; then

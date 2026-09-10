@@ -35,15 +35,17 @@ lib/rootfs-common.sh                # 从上游 vendored 的公共库
    - `kernel_channel`：`stable`（默认）或 `mainline`
    - `boot_mode`：`single`（默认）/ `dual` / `all`
    - `deepin_src_url`：留空用官方 arm64 ISO；或填 deepin-ports 的 flat rootfs / 板级镜像 URL
-4. 跑完在 **Artifacts** 下载 `deepin25-rootfs-<mode>`（`.7z`，完整文件），或从自动创建的
-   Release 下载。
+4. 跑完在 **Artifacts** / **Release** 下载产物：
+   - `deepin_<ver>_<mode>_<ts>.7z`（rootfs）
+   - `boot_sheng_singleboot.img`、`boot_sheng_dualboot.img`（**boot 镜像，由本仓库从同一内核 .deb 现场生成**）
 
-> Release 单资产上限 **2 GiB**：超过会分卷成 `*.part.000`、`*.part.001` …
-> 合并：`cat deepin_*.7z.part.* > deepin.7z`（Artifacts 里的则是完整 `.7z`，无需合并）。
+> Release 单资产上限 **2 GiB**：`.7z` 超过会分卷成 `*.part.000`、`*.part.001` …
+> 合并：`cat deepin_*.7z.part.* > deepin.7z`（Artifacts 里是完整 `.7z`，无需合并）。
+> boot 镜像很小，不分卷。
 
 ## 刷机（本地，Windows/Linux/macOS 都行）
 
-内核启动镜像从上游 **Kernel stable** Release 取：
+boot 镜像（`boot_sheng_*.img`）随本仓库产物一起下发（见上），由**同一次内核 .deb** 现场生成，和 rootfs 内核一致：
 
 - `boot_sheng_singleboot.img` → `root=PARTLABEL=userdata`，配 `single` 模式 rootfs
 - `boot_sheng_dualboot.img` → `root=PARTLABEL=linux`，配 `dual` 模式 rootfs
