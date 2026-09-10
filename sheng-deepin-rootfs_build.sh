@@ -217,6 +217,19 @@ for MODE in "${BOOTMODES[@]}"; do
     echo "==> Injecting sheng kernel .deb..."
     inject_deb_kernel "$ROOTDIR" "./*.deb"
 
+    # 4b. The firmware-xiaomi-sheng .deb installs blobs under /usr/lib/<driver>/
+    # (it ships as a full "Replaces: linux-firmware" package), but the kernel
+    # only searches /lib/firmware/<driver>/. Copy them into the real search path
+    # so WiFi (ath12k), touch (novatek), audio (cirrus) and DSP (qcom) load.
+    echo "==> Normalizing sheng firmware into /lib/firmware/..."
+    mkdir -p "$ROOTDIR/lib/firmware"
+    for _d in ath12k cirrus novatek qca qcom nanosic; do
+        if [ -d "$ROOTDIR/usr/lib/$_d" ]; then
+            cp -a "$ROOTDIR/usr/lib/$_d" "$ROOTDIR/lib/firmware/"
+            echo "    /usr/lib/$_d -> /lib/firmware/$_d"
+        fi
+    done
+
     # 5. Device quirks (shared with the other distro scripts)
     setup_getty_ttyMSM0 "$ROOTDIR"
     setup_qrtr_service "$ROOTDIR"
