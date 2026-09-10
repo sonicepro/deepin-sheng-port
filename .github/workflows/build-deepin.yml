@@ -3,7 +3,7 @@
 # fully self-contained — no dependency on the upstream code002 repo's local
 # workflows. The sheng kernel .deb is pulled from the *upstream* releases.
 #
-# Output: deepin_<ver>_<mode>_<ts>.7z  (sparse ext4 rootfs)
+# Output: deepin_<ver>_<mode>_<ts>.img  (Android-sparse ext4 rootfs)
 # Boot images come from upstream's "Kernel stable" release:
 #   boot_sheng_singleboot.img  -> root=PARTLABEL=userdata  (single mode)
 #   boot_sheng_dualboot.img    -> root=PARTLABEL=linux     (dual mode)
@@ -97,7 +97,7 @@ jobs:
           set -euo pipefail
           sudo -E bash sheng-deepin-rootfs_build.sh \
             deepin-desktop "${{ inputs.kernel_version }}" "${{ inputs.boot_mode }}" dde
-          ls -la ./*.7z
+          ls -la ./*.img
 
       - name: Build boot images from the kernel .deb
         run: |
