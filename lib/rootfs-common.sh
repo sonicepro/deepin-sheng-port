@@ -103,7 +103,15 @@ setup_users() {
 
     chroot "$rootdir" useradd -m -s /bin/bash "$uname" 2>/dev/null || true
     chroot "$rootdir" bash -c "echo '${uname}:${upass}' | chpasswd"
-    chroot "$rootdir" usermod -aG "$groups" "$uname"
+    # Add groups one by one, skipping any that don't exist: an unknown group
+    # makes usermod fail, which under `set -e` would abort the whole build.
+    local g
+    local IFS=','
+    for g in $groups; do
+        [ -n "$g" ] || continue
+        chroot "$rootdir" usermod -aG "$g" "$uname" 2>/dev/null || true
+    done
+    unset IFS
 }
 
 # ---------------------------------------------------------------------------

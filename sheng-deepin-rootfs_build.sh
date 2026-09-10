@@ -182,7 +182,9 @@ extracted_mb=$(du -sm "$STAGE" | cut -f1)
 echo "==> Extracted rootfs: ${extracted_mb} MiB"
 
 if [ -z "$IMAGE_SIZE" ]; then
-    IMAGE_SIZE="$((extracted_mb + 1024))M"
+    # Generous headroom: du undercounts hardlinked/sparse content and ext4 adds
+    # metadata, so +2 GiB keeps rsync from hitting ENOSPC.
+    IMAGE_SIZE="$((extracted_mb + 2048))M"
 fi
 echo "==> Target image size: ${IMAGE_SIZE}"
 
