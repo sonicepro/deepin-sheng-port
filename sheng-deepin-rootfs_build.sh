@@ -32,12 +32,13 @@ source "${SCRIPT_DIR}/lib/rootfs-common.sh"
 IMAGE_SIZE="${IMAGE_SIZE:-}"
 UUID="${UUID:-ee8d3593-59b1-480e-a3b6-4fefb17ee7d8}"   # repo default
 DEEPIN_VERSION="${DEEPIN_VERSION:-25.2.0}"
-# Official generic arm64 userland. Its chip list is Phytium/Kunpeng (server),
-# but the *userland* is plain arm64 (ARMv8-A baseline) and runs on SM8550.
-# For a cleaner installed system, point this at a deepin-ports flat rootfs or a
-# board image, e.g.:
-#   DEEPIN_SRC_URL=https://cdimage.deepin.com/arm64/rock5/deepin-crimson-arm64-rock-5-itx-desktop.img.xz
-DEEPIN_SRC_URL="${DEEPIN_SRC_URL:-https://cdimage.deepin.com/releases/${DEEPIN_VERSION}/arm64/deepin-desktop-community-${DEEPIN_VERSION}-arm64.iso}"
+# Default source: an INSTALLED Deepin arm64 image (NOT the live ISO). The live
+# ISO's squashfs root tends to hang in the systemd phase when used as a disk
+# root; a board image is a real installed system. Rock5 (.img.xz, ext4 root) is
+# the default; override with DEEPIN_SRC_URL. Alternatives:
+#   .../releases/25.2.0/arm64/deepin-desktop-community-25.2.0-arm64.iso  (live ISO)
+#   .../arm64/rubik-pi-3/FlatBuild_RUBIKPi_deepin25.desktop.zip          (Qualcomm board)
+DEEPIN_SRC_URL="${DEEPIN_SRC_URL:-https://cdimage.deepin.com/arm64/rock5/deepin-crimson-arm64-rock-5-itx-desktop.img.xz}"
 
 ROOT_PASS="${ROOT_PASS:-1234}"
 USER_PASS="${USER_PASS:-luser}"
@@ -254,6 +255,17 @@ for MODE in "${BOOTMODES[@]}"; do
     fi
     configure_touchscreen "$ROOTDIR"
     fix_wifi_firmware "$ROOTDIR"
+
+    # 5c. Device system files + sshd, so the tablet is reachable at 192.168.42.15
+    # over the USB-C cable even with no display (USB RNDIS/ECM gadget).
+    if [ -d "$SCRIPT_DIR/system_files" ]; then
+        cp -a "$SCRIPT_DIR/system_files/." "$ROOTDIR/"
+    fi
+    chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y openssh-server" >/dev/null 2>&1 || true
+    chroot "$ROOTDIR" systemctl enable usb-gadget-net.service 2>/dev/null || true
+    chroot "$ROOTDIR" systemctl enable ssh 2>/dev/null || chroot "$ROOTDIR" systemctl enable sshd 2>/dev/null || true
+    printf '\nDeepin (sheng) USB 网络： ssh %s@192.168.42.15  (Windows 侧网卡设 192.168.42.1/24)\n\n' "$USER_NAME" \
+        > "$ROOTDIR/etc/issue"
 
     # 6. Users + hostname + locale
     setup_users "$ROOTDIR" "$ROOT_PASS" "$USER_NAME" "$USER_PASS" \

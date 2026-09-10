@@ -1,0 +1,13 @@
+[Unit]
+Description=USB RNDIS/ECM gadget network (192.168.42.15)
+After=sys-kernel-config.mount network-pre.target
+Wants=sys-kernel-config.mount
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/usb-gadget-net.sh
+
+[Install]
+WantedBy=multi-user.target
