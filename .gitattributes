@@ -1,0 +1,5 @@
+# Shell scripts and workflow YAML must keep LF endings (they run on Linux CI).
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*      text=auto

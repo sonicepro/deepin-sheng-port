@@ -1,0 +1,58 @@
+# .github/workflows/build-deepin.yml
+# Build the Deepin arm64 rootfs for Xiaomi Pad 6S Pro (sheng) on GitHub Actions.
+# Drop into a fork of code002-2/Xiaomi-pad-6s-pro-Linux (branch "sheng").
+#
+# Prerequisite: run the existing "Build Kernel" workflow (+ "Build Kernel
+# Bundle") first — this rootfs workflow downloads the kernel .deb from the
+# `kernel-bundle-latest` release via _rootfs-template.yml.
+name: Build Deepin 25 Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: '内核版本'
+        required: true
+        default: '7.1'
+      kernel_channel:
+        description: '内核通道'
+        required: true
+        type: choice
+        options: [mainline, stable]
+        default: 'mainline'
+      boot_mode:
+        description: '启动模式'
+        required: true
+        type: choice
+        options: [all, dual, single]
+        default: 'all'
+      skip_release:
+        description: '跳过创建 GitHub Release'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/_rootfs-template.yml
+    with:
+      distro: deepin-desktop
+      script: sheng-deepin-rootfs_build.sh
+      kernel_version_default: '7.1'
+      kernel_channel_default: 'mainline'
+      kernel_channel: ${{ github.event.inputs.kernel_channel }}
+      # Deepin ships a single DE (DDE); flavour is accepted and ignored.
+      desktop_env: 'dde'
+      boot_mode: ${{ github.event.inputs.boot_mode }}
+      desktop_matrix: '["dde"]'
+      boot_matrix: '["all"]'
+      release_tag_prefix: deepin25
+      release_body_title: "Deepin 25 (crimson) Desktop"
+      skip_release: ${{ github.event.inputs.skip_release == 'true' }}
+    secrets: inherit
