@@ -35,8 +35,11 @@ lib/rootfs-common.sh                # 从上游 vendored 的公共库
    - `kernel_channel`：`stable`（默认）或 `mainline`
    - `boot_mode`：`single`（默认）/ `dual` / `all`
    - `deepin_src_url`：留空用官方 arm64 ISO；或填 deepin-ports 的 flat rootfs / 板级镜像 URL
-4. 跑完在 **Artifacts** 下载 `deepin25-rootfs-<mode>`（`.7z`），或从自动创建的
+4. 跑完在 **Artifacts** 下载 `deepin25-rootfs-<mode>`（`.7z`，完整文件），或从自动创建的
    Release 下载。
+
+> Release 单资产上限 **2 GiB**：超过会分卷成 `*.part.000`、`*.part.001` …
+> 合并：`cat deepin_*.7z.part.* > deepin.7z`（Artifacts 里的则是完整 `.7z`，无需合并）。
 
 ## 刷机（本地，Windows/Linux/macOS 都行）
 
