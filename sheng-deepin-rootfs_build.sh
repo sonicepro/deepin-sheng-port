@@ -68,7 +68,11 @@ fi
 
 # --- Download the Deepin source once ----------------------------------------
 DLDIR="$(mktemp -d)"
-src_file="${DLDIR}/deepin-src"
+# Keep the URL's basename so the extension survives the download — fetch_rootfs
+# dispatches on extension (.iso / .tar.xz / .img.xz / .zip).
+src_name="$(basename "${DEEPIN_SRC_URL%%\?*}")"
+{ [ -n "${src_name}" ] && [ "${src_name}" != "/" ]; } || src_name="deepin-src"
+src_file="${DLDIR}/${src_name}"
 echo "==> Fetching Deepin arm64 source: ${DEEPIN_SRC_URL}"
 wget -nv -O "${src_file}" "${DEEPIN_SRC_URL}"
 echo "==> Source size: $(du -h "${src_file}" | cut -f1)"
@@ -81,7 +85,7 @@ fetch_rootfs() {
         *.iso)
             local mnt; mnt="$(mktemp -d)"
             mount -o loop,ro "$src" "$mnt"
-            local sq; sq="$(find "$mnt" -maxdepth 5 -name 'filesystem.squashfs' | head -1)"
+            local sq; sq="$(find "$mnt" -maxdepth 6 -name 'filesystem.squashfs' | head -1)"
             if [ -z "$sq" ]; then
                 echo "ERROR: no filesystem.squashfs found inside ISO" >&2
                 umount "$mnt"; rmdir "$mnt"; return 1
@@ -130,8 +134,26 @@ fetch_rootfs() {
             fi
             ;;
         *)
-            echo "ERROR: unsupported archive type: ${src}" >&2
-            return 1
+            # Unknown/absent extension -> sniff the magic and retry once via a
+            # symlink that carries the right extension.
+            local ft; ft="$(file -b "$src" 2>/dev/null || echo '')"
+            local ext=""
+            case "$ft" in
+                *ISO\ 9660*) ext="iso" ;;
+                *XZ*)        ext="tar.xz" ;;
+                *gzip*)      ext="tar.gz" ;;
+                *Zip*)       ext="zip" ;;
+            esac
+            if [ -n "$ext" ]; then
+                local link="${src}.sniff.${ext}"
+                ln -sf "$(readlink -f "$src")" "$link"
+                echo "    (sniffed type: ${ext})"
+                fetch_rootfs "$link" "$dest"
+                rm -f "$link"
+            else
+                echo "ERROR: unsupported archive type: ${src} (file says: ${ft})" >&2
+                return 1
+            fi
             ;;
     esac
 }
