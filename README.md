@@ -59,6 +59,43 @@ fastboot reboot
 
 > **boot.img 与 rootfs 必须同一次内核构建**：都从上游同一个 Kernel Release 取即可。
 
+### 双系统模式（Android + Linux 共存）
+
+Android 在 **slot A**，Linux 在 **slot B**（`boot_b` + `linux` 分区），靠 A/B 槽切换。
+需要先重分区腾出一个 `linux` 分区：
+
+1. 进 TWRP：`adb reboot recovery`；把 `parted` 推到设备：`adb push parted /sdcard`
+2. `adb shell` → `chmod +x /sdcard/parted && /sdcard/parted /dev/block/sda`
+3. `print` 记下 `userdata` 的编号（一般 **29**）；`rm 29`
+4. 建两个分区（大小按你的磁盘调整）：
+   `mkpart userdata ext4 12.7GB 140.7GB` 和 `mkpart linux ext4 140.7GB -0MB`
+5. `print` 确认 `userdata=29`、`linux=30`，然后 `quit`、`exit`
+
+> ⚠️ 重分区会**清空 Android 的 userdata**（Android 系统本身还在，但应用数据没了）——先备份。
+
+然后刷入 Linux（**用 `dual` 模式构建的产物**）：
+
+```bash
+fastboot erase dtbo_b
+fastboot flash boot_b boot_sheng_dualboot.img
+
+7z x deepin_25.2.0_dual_<时间>.7z
+fastboot flash linux deepin_25.2.0_dual_<时间>.img
+fastboot set_active b
+fastboot reboot
+```
+
+首次启动后扩容：`sudo resize2fs /dev/sda30`（`linux` 分区）。
+
+**切换系统**（fastboot，不需要 root）：
+
+```bash
+fastboot set_active b   # 进 Linux
+fastboot set_active a   # 回 Android
+```
+
+> 上游明确警告：**别用 `qbootctl`**，会变砖。
+
 ## 已知注意点
 
 - **磁盘**：完整 Deepin 桌面 rootfs 约 10 GiB，镜像按解压后大小自动定尺寸。
