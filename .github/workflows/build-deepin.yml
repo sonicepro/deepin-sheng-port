@@ -132,7 +132,7 @@ jobs:
         with:
           name: deepin25-rootfs-${{ inputs.boot_mode }}
           path: |
-            *.7z
+            deepin_*.img
             boot_sheng_*.img
           retention-days: 7
           if-no-files-found: error
@@ -143,7 +143,7 @@ jobs:
           shopt -s nullglob
           mkdir -p release
           cp boot_sheng_*.img release/ 2>/dev/null || true
-          for f in *.7z; do
+          for f in deepin_*.img; do
             sz=$(stat -c %s "$f")
             if [ "$sz" -gt 2000000000 ]; then
               echo "==> ${f} is ${sz} bytes (>2 GiB); splitting into 1900M parts"
@@ -170,6 +170,7 @@ jobs:
             | 启动模式 | ${{ inputs.boot_mode }} |
             | 源 | ${{ inputs.deepin_src_url || '官方 arm64 ISO' }} |
 
-            > GitHub Release 单资产上限 2 GiB。超过的文件会按 1900M 分卷成 `*.part.000`, `*.part.001` …
-            > 合并：`cat deepin_*.7z.part.* > deepin.7z`，再 `7z x deepin.7z`
+            > GitHub Release 单资产上限 2 GiB，超过的镜像会按 1900M 分卷成 `*.part.000` …
+            > 直接合并即得可刷镜像（一步，无需再解压）：
+            > `cat deepin_*.img.part.* > deepin.img`
           files: release/*

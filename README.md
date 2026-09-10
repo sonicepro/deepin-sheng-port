@@ -36,12 +36,12 @@ lib/rootfs-common.sh                # 从上游 vendored 的公共库
    - `boot_mode`：`single`（默认）/ `dual` / `all`
    - `deepin_src_url`：留空用官方 arm64 ISO；或填 deepin-ports 的 flat rootfs / 板级镜像 URL
 4. 跑完在 **Artifacts** / **Release** 下载产物：
-   - `deepin_<ver>_<mode>_<ts>.7z`（rootfs）
+   - `deepin_<ver>_<mode>_<ts>.img`（Android sparse rootfs，**直接可刷**）
    - `boot_sheng_singleboot.img`、`boot_sheng_dualboot.img`（**boot 镜像，由本仓库从同一内核 .deb 现场生成**）
 
-> Release 单资产上限 **2 GiB**：`.7z` 超过会分卷成 `*.part.000`、`*.part.001` …
-> 合并：`cat deepin_*.7z.part.* > deepin.7z`（Artifacts 里是完整 `.7z`，无需合并）。
-> boot 镜像很小，不分卷。
+> Artifacts 下载是 GitHub 打包的 `.zip`，解开**就是** `.img`（一次）。
+> Release 单资产上限 **2 GiB**，超过会分卷成 `deepin_*.img.part.000` …，
+> **合并即得可刷镜像**（一步，无需再解压）：`cat deepin_*.img.part.* > deepin.img`。
 
 ## 只构建 boot 镜像（轻量，不重建 rootfs）
 
@@ -61,8 +61,6 @@ boot 镜像（`boot_sheng_*.img`）随本仓库产物一起下发（见上），
 ```bash
 fastboot erase dtbo_b
 fastboot flash boot_b boot_sheng_singleboot.img
-
-7z x deepin_25.2.0_single_<时间>.7z
 fastboot erase userdata
 fastboot flash userdata deepin_25.2.0_single_<时间>.img
 fastboot reboot
@@ -89,8 +87,6 @@ Android 在 **slot A**，Linux 在 **slot B**（`boot_b` + `linux` 分区），�
 ```bash
 fastboot erase dtbo_b
 fastboot flash boot_b boot_sheng_dualboot.img
-
-7z x deepin_25.2.0_dual_<时间>.7z
 fastboot flash linux deepin_25.2.0_dual_<时间>.img
 fastboot set_active b
 fastboot reboot
@@ -112,14 +108,24 @@ fastboot set_active a   # 回 Android
 - **磁盘**：完整 Deepin 桌面 rootfs 约 10 GiB，镜像按解压后大小自动定尺寸。
   workflow 里已加"释放磁盘空间"步骤；`dual` 模式会构建两个镜像、占用更大，
   建议优先 `single`。
-- **源的选择**：默认官方 ISO 的 squashfs 是 **live** 系统（可能带 live 残留）。
-  更干净的是 deepin-ports 的 **flat rootfs** 或**板级 `.img.xz`**——
-  用 `deepin_src_url` 一行覆盖即可（脚本自动识别 ISO/tar/img.xz/zip）。
+- **源**：默认用 **rock5 已安装镜像**（`.img.xz`）。官方 arm64 ISO 的 squashfs 是
+  **live** 系统，当磁盘根常卡在 systemd 阶段，**不推荐**（可用 `deepin_src_url` 覆盖，
+  脚本自动识别 ISO/tar/img.xz/zip）。
 - **无 initramfs**：本方案复用的 `boot_sheng_*.img` **不带 ramdisk**，依赖内核内置
   UFS/ext4。
 - **DDE 会话**：脚本 best-effort 配了 lightdm 自动登录；若 Deepin 25 用的不是
   lightdm，该文件无害。
 - **首次启动**：视分区可能需要 `sudo resize2fs /dev/sda30` 扩容。
+
+## USB 网络 / SSH（无需显示即可调试）
+
+镜像内置 USB RNDIS/ECM 网卡 gadget + sshd：
+
+- **设备 IP：`192.168.42.15`**（固定）
+- Windows：接 USB 线后会出现一个新网卡（Remote NDIS…），把它设成 `192.168.42.1/24`：
+  `netsh interface ip set address "以太网 <n>" static 192.168.42.1 255.255.255.0`
+- 然后：`ssh luser@192.168.42.15`（密码 `luser`）
+- 看启动问题：`systemctl --failed`、`journalctl -xb`
 
 ## 首次登录
 

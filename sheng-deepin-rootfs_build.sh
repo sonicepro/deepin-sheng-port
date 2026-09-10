@@ -282,11 +282,17 @@ for MODE in "${BOOTMODES[@]}"; do
     # 8. fstab (bound by PARTLABEL, matches the boot.img cmdline)
     generate_fstab "$ROOTDIR" "$MODE"
 
-    # 9. Unmount, stamp UUID, pack sparse + 7z
+    # 9. Unmount, stamp UUID, convert to Android sparse (.img).
+    # Emit the sparse image DIRECTLY (no 7z wrapper): GitHub artifacts download
+    # as a .zip, so a bare .img means a single extraction; in the release the
+    # split parts `cat` straight into the flashable image.
     teardown_mounts "$ROOTDIR"
     apply_fs_uuid "$UUID" "$ROOTFS_IMG"
-    echo "==> Packing sparse ${ROOTFS_IMG} -> ${ROOTFS_IMG%.img}.7z"
-    pack_sparse_image "$ROOTFS_IMG" "${ROOTFS_IMG%.img}.7z"
+    echo "==> Converting ${ROOTFS_IMG} to Android sparse..."
+    img2simg "$ROOTFS_IMG" "sparse_${ROOTFS_IMG}"
+    rm -f "$ROOTFS_IMG"
+    mv "sparse_${ROOTFS_IMG}" "$ROOTFS_IMG"
+    echo "==> Flashable image: ${ROOTFS_IMG} ($(du -h "$ROOTFS_IMG" | cut -f1))"
 
     echo "[MODE=$MODE] 完成！"
 done
