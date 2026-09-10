@@ -36,12 +36,12 @@ lib/rootfs-common.sh                # 从上游 vendored 的公共库
    - `boot_mode`：`single`（默认）/ `dual` / `all`
    - `deepin_src_url`：留空用官方 arm64 ISO；或填 deepin-ports 的 flat rootfs / 板级镜像 URL
 4. 跑完在 **Artifacts** / **Release** 下载产物：
-   - `deepin_<ver>_<mode>_<ts>.img`（Android sparse rootfs，**直接可刷**）
+   - `deepin_<ver>_<mode>_<ts>.img.gz`（Android sparse rootfs 的 gzip）
    - `boot_sheng_singleboot.img`、`boot_sheng_dualboot.img`（**boot 镜像，由本仓库从同一内核 .deb 现场生成**）
 
-> Artifacts 下载是 GitHub 打包的 `.zip`，解开**就是** `.img`（一次）。
-> Release 单资产上限 **2 GiB**，超过会分卷成 `deepin_*.img.part.000` …，
-> **合并即得可刷镜像**（一步，无需再解压）：`cat deepin_*.img.part.* > deepin.img`。
+> 解压 rootfs 得 `.img`（7-Zip 任意版本可解 `.gz`，或命令行）：
+> - **Release**（分卷一条命令）：`cat deepin_*.img.gz.part.* | gzip -d > deepin.img`
+> - **Artifacts**（zip 内是单个 `.img.gz`）：解出后 `gzip -d deepin_*.img.gz`
 
 ## 只构建 boot 镜像（轻量，不重建 rootfs）
 

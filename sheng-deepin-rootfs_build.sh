@@ -294,11 +294,12 @@ for MODE in "${BOOTMODES[@]}"; do
     # split parts `cat` straight into the flashable image.
     teardown_mounts "$ROOTDIR"
     apply_fs_uuid "$UUID" "$ROOTFS_IMG"
-    echo "==> Converting ${ROOTFS_IMG} to Android sparse..."
+    echo "==> Converting ${ROOTFS_IMG} to Android sparse + gzip..."
     img2simg "$ROOTFS_IMG" "sparse_${ROOTFS_IMG}"
     rm -f "$ROOTFS_IMG"
-    mv "sparse_${ROOTFS_IMG}" "$ROOTFS_IMG"
-    echo "==> Flashable image: ${ROOTFS_IMG} ($(du -h "$ROOTFS_IMG" | cut -f1))"
+    gzip -6 "sparse_${ROOTFS_IMG}"
+    mv "sparse_${ROOTFS_IMG}.gz" "${ROOTFS_IMG}.gz"
+    echo "==> Image: ${ROOTFS_IMG}.gz ($(du -h "${ROOTFS_IMG}.gz" | cut -f1))  (gzip -d -> ${ROOTFS_IMG})"
 
     echo "[MODE=$MODE] 完成！"
 done
