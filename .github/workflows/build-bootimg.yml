@@ -1,0 +1,113 @@
+# .github/workflows/build-bootimg.yml
+# Lightweight: build ONLY boot_sheng_*.img from the upstream kernel .deb.
+# No rootfs, no arm runner — pure-Python mkbootimg + dpkg-deb on ubuntu-latest.
+# Use this to (re)generate the boot image for a kernel you already have a
+# rootfs for, without rebuilding the (multi-GB) rootfs.
+name: Build boot images (boot.img only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: '内核版本'
+        required: true
+        default: '7.1'
+      kernel_channel:
+        description: '内核通道'
+        required: true
+        type: choice
+        options: [stable, mainline]
+        default: 'stable'
+      skip_release:
+        description: '跳过创建 GitHub Release'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  bootimg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download sheng kernel .deb (from upstream releases)
+        env:
+          KVER: ${{ inputs.kernel_version }}
+          CHANNEL: ${{ inputs.kernel_channel }}
+        run: |
+          set -euo pipefail
+          REPO=code002-2/Xiaomi-pad-6s-pro-Linux
+          got=0
+          for TAG in "kernel-bundle-${CHANNEL}-${KVER}" "kernel-bundle-${KVER}" kernel-bundle-latest; do
+            echo "==> trying release tag: ${TAG}"
+            if curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" -o rel.json; then
+              url=$(jq -r '.assets[] | select(.name | test("linux-xiaomi-sheng.*\\.deb$")) | .browser_download_url' rel.json | head -1)
+              if [ -n "$url" ] && [ "$url" != "null" ]; then
+                echo "   download $url"
+                curl -fsSL -o linux-xiaomi-sheng.deb "$url"
+                got=1
+                break
+              fi
+            fi
+          done
+          [ "$got" -eq 1 ] || { echo "ERROR: linux-xiaomi-sheng.deb not found in upstream releases"; exit 1; }
+          ls -la linux-xiaomi-sheng.deb
+
+      - name: Build boot_sheng_*.img
+        run: |
+          set -euo pipefail
+          rm -rf kdeb && mkdir kdeb
+          dpkg-deb -x linux-xiaomi-sheng.deb kdeb
+          payload=""
+          for c in kdeb/boot/Image.gz-dtb_sheng kdeb/boot/zImage_sheng; do
+            [ -f "$c" ] && payload="$c" && break
+          done
+          if [ -z "$payload" ]; then
+            [ -f kdeb/boot/Image.gz ] && [ -f kdeb/boot/sm8550-xiaomi-sheng.dtb ] \
+              || { echo "ERROR: kernel payload missing in deb"; find kdeb/boot -type f; exit 1; }
+            cat kdeb/boot/Image.gz kdeb/boot/sm8550-xiaomi-sheng.dtb > zImage_sheng
+            payload=zImage_sheng
+          fi
+          echo "==> kernel payload: $payload"
+          python3 mkbootimg --kernel "$payload" \
+            --cmdline "root=PARTLABEL=userdata rootwait rw fsck.repair=yes" \
+            --base 0x00000000 --kernel_offset 0x00008000 --tags_offset 0x01e00000 --pagesize 4096 \
+            -o boot_sheng_singleboot.img
+          python3 mkbootimg --kernel "$payload" \
+            --cmdline "root=PARTLABEL=linux rootwait rw fsck.repair=yes" \
+            --base 0x00000000 --kernel_offset 0x00008000 --tags_offset 0x01e00000 --pagesize 4096 \
+            -o boot_sheng_dualboot.img
+          ls -la boot_sheng_*.img
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-sheng-${{ inputs.kernel_channel }}-${{ inputs.kernel_version }}
+          path: boot_sheng_*.img
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create release
+        if: ${{ !inputs.skip_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: bootimg-${{ inputs.kernel_channel }}-${{ inputs.kernel_version }}-${{ github.run_number }}
+          name: "boot images (${{ inputs.kernel_channel }} ${{ inputs.kernel_version }}) #${{ github.run_number }}"
+          body: |
+            **sheng boot images** (Android boot.img, header-v0) built from the upstream kernel .deb.
+
+            | 项目 | 详情 |
+            |------|------|
+            | 内核 | ${{ inputs.kernel_version }} / ${{ inputs.kernel_channel }} |
+            | 几何 | base 0x0, pagesize 4096, header v0 |
+
+            - `boot_sheng_singleboot.img` → `root=PARTLABEL=userdata`（单系统）
+            - `boot_sheng_dualboot.img` → `root=PARTLABEL=linux`（双系统）
+          files: boot_sheng_*.img

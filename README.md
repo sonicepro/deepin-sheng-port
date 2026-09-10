@@ -43,6 +43,12 @@ lib/rootfs-common.sh                # 从上游 vendored 的公共库
 > 合并：`cat deepin_*.7z.part.* > deepin.7z`（Artifacts 里是完整 `.7z`，无需合并）。
 > boot 镜像很小，不分卷。
 
+## 只构建 boot 镜像（轻量，不重建 rootfs）
+
+只想要/重做 `boot_sheng_*.img`（比如已有 rootfs）时，跑 **Build boot images** workflow
+（`build-bootimg.yml`）：纯 Python `mkbootimg`，跑在 `ubuntu-latest`（**不需要 arm runner**），
+1~2 分钟，只下载内核 `.deb` 现场生成两个 boot 镜像。
+
 ## 刷机（本地，Windows/Linux/macOS 都行）
 
 boot 镜像（`boot_sheng_*.img`）随本仓库产物一起下发（见上），由**同一次内核 .deb** 现场生成，和 rootfs 内核一致：
