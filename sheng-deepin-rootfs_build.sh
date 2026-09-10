@@ -9,19 +9,18 @@
 # plain ext4 image, inject the sheng kernel .deb, apply the device quirks, and
 # emit a fastboot-flashable sparse rootfs.
 #
-# Drop into a fork of code002-2/Xiaomi-pad-6s-pro-Linux (branch "sheng"),
-# at repo root, next to lib/rootfs-common.sh. Driven by
-# .github/workflows/build-deepin.yml (runs-on: ubuntu-24.04-arm).
+# Self-contained: sources ./lib/rootfs-common.sh (vendored in this repo).
+# Driven by .github/workflows/build-deepin.yml (runs-on: ubuntu-24.04-arm).
 #
 # Supported sources (auto-detected by extension), override with DEEPIN_SRC_URL:
-#   *.iso         official arm64 ISO   -> unsquashfs the live filesystem
-#   *.tar.xz/.zst deepin-ports flat     -> tar -x
-#   *.img.xz/.gz  board image           -> decompress, mount ext4 part, rsync
-#   *.zip         FlatBuild             -> unzip
+#   *.iso          official arm64 ISO   -> unsquashfs the live filesystem
+#   *.tar.xz/.zst  deepin-ports flat     -> tar -x
+#   *.img.xz/.gz   board image           -> decompress, mount ext4 part, rsync
+#   *.zip          FlatBuild             -> unzip
 #
 # Usage (same arg contract as sheng-rootfs_build.sh):
-#   sudo bash sheng-deepin-rootfs_build.sh deepin-desktop 7.1 all all
-#     args: <distro-variant> <kernel_version> [boot_mode: all|dual|single] [flavour]
+#   sudo bash sheng-deepin-rootfs_build.sh deepin-desktop 7.1 single dde
+#     args: <distro-variant> <kernel_version> [boot_mode: single|dual|all] [flavour]
 # =============================================================================
 set -euo pipefail
 
@@ -29,7 +28,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/rootfs-common.sh"
 
 # --- Configuration -----------------------------------------------------------
-IMAGE_SIZE="${IMAGE_SIZE:-12G}"
+# Empty IMAGE_SIZE => auto-size from the extracted rootfs (+1 GiB headroom).
+IMAGE_SIZE="${IMAGE_SIZE:-}"
 UUID="${UUID:-ee8d3593-59b1-480e-a3b6-4fefb17ee7d8}"   # repo default
 DEEPIN_VERSION="${DEEPIN_VERSION:-25.2.0}"
 # Official generic arm64 userland. Its chip list is Phytium/Kunpeng (server),
@@ -49,8 +49,8 @@ validate_root
 
 DISTRO=$1
 KERNEL=$2
-TARGET_MODE=${3:-all}
-TARGET_FLAVOUR=${4:-all}   # Deepin has a single DE (DDE); accepted and ignored
+TARGET_MODE=${3:-single}
+TARGET_FLAVOUR=${4:-dde}   # Deepin has a single DE (DDE); accepted and ignored
 
 TIMESTAMP=$(generate_timestamp)
 
@@ -66,9 +66,9 @@ if [ "$_missing" -eq 1 ]; then
         squashfs-tools zstd unzip rsync xz-utils util-linux
 fi
 
-# --- Download the Deepin source once, reused across boot modes --------------
-STAGE_DL="$(mktemp -d)"
-src_file="${STAGE_DL}/deepin-src"
+# --- Download the Deepin source once ----------------------------------------
+DLDIR="$(mktemp -d)"
+src_file="${DLDIR}/deepin-src"
 echo "==> Fetching Deepin arm64 source: ${DEEPIN_SRC_URL}"
 wget -nv -O "${src_file}" "${DEEPIN_SRC_URL}"
 echo "==> Source size: $(du -h "${src_file}" | cut -f1)"
@@ -110,7 +110,7 @@ fetch_rootfs() {
                 fi
             done
             if [ -z "$part" ]; then
-                echo "ERROR: no ext4 partition in image (is it Deepin?)" >&2
+                echo "ERROR: no ext4 partition in image" >&2
                 losetup -d "$loop"; return 1
             fi
             echo "    root partition: ${part}"
@@ -122,7 +122,6 @@ fetch_rootfs() {
             ;;
         *.zip)
             unzip -q "$src" -d "$dest"
-            # Some FlatBuilds wrap the tree in a single top dir or an .img
             local nested_img; nested_img="$(find "$dest" -maxdepth 2 -name '*.img' | head -1)"
             if [ -n "$nested_img" ] && [ "$(find "$dest" -maxdepth 1 -mindepth 1 | wc -l)" -le 2 ]; then
                 local redo; redo="$(mktemp -d)"
@@ -148,8 +147,22 @@ autologin-user-timeout=0
 EOF
 }
 
+# --- Extract once up front (so we can size the image to fit) -----------------
+echo "==> Extracting Deepin userland..."
+STAGE="$(mktemp -d)"
+fetch_rootfs "$src_file" "$STAGE"
+rm -rf "$DLDIR"          # reclaim the downloaded archive
+extracted_mb=$(du -sm "$STAGE" | cut -f1)
+echo "==> Extracted rootfs: ${extracted_mb} MiB"
+
+if [ -z "$IMAGE_SIZE" ]; then
+    IMAGE_SIZE="$((extracted_mb + 1024))M"
+fi
+echo "==> Target image size: ${IMAGE_SIZE}"
+
 # --- Build loop over boot modes ---------------------------------------------
 mapfile -t BOOTMODES < <(parse_boot_modes "$TARGET_MODE") || exit 1
+MODES_LEFT=${#BOOTMODES[@]}
 
 for MODE in "${BOOTMODES[@]}"; do
     echo ""
@@ -157,7 +170,7 @@ for MODE in "${BOOTMODES[@]}"; do
     echo "构建 Deepin ${DEEPIN_VERSION} | 模式: $MODE"
     echo "======================================================"
 
-    preflight_checks 15360
+    preflight_checks 10240
 
     ROOTFS_IMG="deepin_${DEEPIN_VERSION}_${MODE}_${TIMESTAMP}.img"
 
@@ -166,30 +179,29 @@ for MODE in "${BOOTMODES[@]}"; do
     setup_chroot_mounts "$ROOTDIR"
     trap_teardown "$ROOTDIR"
 
-    # 2. Extract the Deepin userland into a staging dir
-    echo "==> Extracting Deepin userland..."
-    STAGE="$(mktemp -d)"
-    fetch_rootfs "$src_file" "$STAGE"
-
-    # 3. Flatten it into the image (preserve perms/xattrs/hardlinks)
+    # 2. Flatten the staged userland into the image (preserve perms/xattrs)
     echo "==> Copying userland into ${ROOTFS_IMG}..."
     rsync -aHAX --numeric-ids --info=progress2 "$STAGE/" "$ROOTDIR/"
-    rm -rf "$STAGE"
 
-    # 4. DNS inside chroot
+    # Free the staging tree before the (space-hungry) sparse pack, unless a
+    # later boot mode still needs it.
+    MODES_LEFT=$((MODES_LEFT - 1))
+    [ "$MODES_LEFT" -eq 0 ] && rm -rf "$STAGE"
+
+    # 3. DNS inside chroot
     setup_dns "$ROOTDIR" 223.5.5.5 1.1.1.1 8.8.8.8
 
-    # 5. Inject the sheng kernel .deb (placed in cwd by _rootfs-template.yml)
+    # 4. Inject the sheng kernel .deb (placed in cwd by the workflow)
     echo "==> Injecting sheng kernel .deb..."
     inject_deb_kernel "$ROOTDIR" "./*.deb"
 
-    # 6. Device quirks (shared with the other distro scripts)
+    # 5. Device quirks (shared with the other distro scripts)
     setup_getty_ttyMSM0 "$ROOTDIR"
     setup_qrtr_service "$ROOTDIR"
     configure_touchscreen "$ROOTDIR"
     fix_wifi_firmware "$ROOTDIR"
 
-    # 7. Users + hostname + locale
+    # 6. Users + hostname + locale
     setup_users "$ROOTDIR" "$ROOT_PASS" "$USER_NAME" "$USER_PASS" \
         "sudo,audio,video,render,input,plugdev,netdev"
     echo "deepin-sheng-${MODE}" > "$ROOTDIR/etc/hostname"
@@ -197,14 +209,14 @@ for MODE in "${BOOTMODES[@]}"; do
     printf 'zh_CN.UTF-8\n'       > "$ROOTDIR/etc/locale.conf" 2>/dev/null || true
     chroot "$ROOTDIR" ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>/dev/null || true
 
-    # 8. Autologin + default graphical target (best effort)
+    # 7. Autologin + default graphical target (best effort)
     setup_deepin_autologin "$ROOTDIR" "$USER_NAME"
     chroot "$ROOTDIR" systemctl set-default graphical.target 2>/dev/null || true
 
-    # 9. fstab (bound by PARTLABEL, matches the boot.img cmdline)
+    # 8. fstab (bound by PARTLABEL, matches the boot.img cmdline)
     generate_fstab "$ROOTDIR" "$MODE"
 
-    # 10. Unmount, stamp UUID, pack sparse + 7z
+    # 9. Unmount, stamp UUID, pack sparse + 7z
     teardown_mounts "$ROOTDIR"
     apply_fs_uuid "$UUID" "$ROOTFS_IMG"
     echo "==> Packing sparse ${ROOTFS_IMG} -> ${ROOTFS_IMG%.img}.7z"
@@ -213,5 +225,4 @@ for MODE in "${BOOTMODES[@]}"; do
     echo "[MODE=$MODE] 完成！"
 done
 
-rm -rf "$STAGE_DL"
 echo "[OK] Deepin arm64 rootfs build complete!"

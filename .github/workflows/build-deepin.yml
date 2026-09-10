@@ -1,10 +1,12 @@
 # .github/workflows/build-deepin.yml
-# Build the Deepin arm64 rootfs for Xiaomi Pad 6S Pro (sheng) on GitHub Actions.
-# Drop into a fork of code002-2/Xiaomi-pad-6s-pro-Linux (branch "sheng").
+# Build the Deepin 25 (crimson) arm64 rootfs for Xiaomi Pad 6S Pro (sheng),
+# fully self-contained — no dependency on the upstream code002 repo's local
+# workflows. The sheng kernel .deb is pulled from the *upstream* releases.
 #
-# Prerequisite: run the existing "Build Kernel" workflow (+ "Build Kernel
-# Bundle") first — this rootfs workflow downloads the kernel .deb from the
-# `kernel-bundle-latest` release via _rootfs-template.yml.
+# Output: deepin_<ver>_<mode>_<ts>.7z  (sparse ext4 rootfs)
+# Boot images come from upstream's "Kernel stable" release:
+#   boot_sheng_singleboot.img  -> root=PARTLABEL=userdata  (single mode)
+#   boot_sheng_dualboot.img    -> root=PARTLABEL=linux     (dual mode)
 name: Build Deepin 25 Desktop
 
 on:
@@ -18,14 +20,18 @@ on:
         description: '内核通道'
         required: true
         type: choice
-        options: [mainline, stable]
-        default: 'mainline'
+        options: [stable, mainline]
+        default: 'stable'
       boot_mode:
         description: '启动模式'
         required: true
         type: choice
-        options: [all, dual, single]
-        default: 'all'
+        options: [single, dual, all]
+        default: 'single'
+      deepin_src_url:
+        description: '覆盖 Deepin 源 URL（留空=官方 arm64 ISO）'
+        required: false
+        default: ''
       skip_release:
         description: '跳过创建 GitHub Release'
         type: boolean
@@ -40,19 +46,79 @@ permissions:
 
 jobs:
   build:
-    uses: ./.github/workflows/_rootfs-template.yml
-    with:
-      distro: deepin-desktop
-      script: sheng-deepin-rootfs_build.sh
-      kernel_version_default: '7.1'
-      kernel_channel_default: 'mainline'
-      kernel_channel: ${{ github.event.inputs.kernel_channel }}
-      # Deepin ships a single DE (DDE); flavour is accepted and ignored.
-      desktop_env: 'dde'
-      boot_mode: ${{ github.event.inputs.boot_mode }}
-      desktop_matrix: '["dde"]'
-      boot_matrix: '["all"]'
-      release_tag_prefix: deepin25
-      release_body_title: "Deepin 25 (crimson) Desktop"
-      skip_release: ${{ github.event.inputs.skip_release == 'true' }}
-    secrets: inherit
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # A full Deepin desktop rootfs is ~10 GiB; the stock runner needs headroom.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean
+          df -h / || true
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            p7zip-full curl wget jq rsync xz-utils zstd unzip \
+            squashfs-tools util-linux android-sdk-libsparse-utils
+
+      - name: Download sheng kernel .deb (from upstream releases)
+        env:
+          KVER: ${{ inputs.kernel_version }}
+          CHANNEL: ${{ inputs.kernel_channel }}
+        run: |
+          set -euo pipefail
+          REPO=code002-2/Xiaomi-pad-6s-pro-Linux
+          got=0
+          for TAG in "kernel-bundle-${CHANNEL}-${KVER}" "kernel-bundle-${KVER}" kernel-bundle-latest; do
+            echo "==> trying release tag: ${TAG}"
+            if curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" -o rel.json; then
+              if jq -e '.assets | length > 0' rel.json >/dev/null 2>&1; then
+                jq -r '.assets[].browser_download_url' rel.json | while read -r u; do
+                  echo "   download $(basename "$u")"
+                  curl -fsSL -O "$u"
+                done
+                got=1
+                break
+              fi
+            fi
+          done
+          [ "$got" -eq 1 ] || { echo "ERROR: no upstream kernel release found"; exit 1; }
+          ls -la ./*.deb
+
+      - name: Build Deepin rootfs
+        env:
+          DEEPIN_SRC_URL: ${{ inputs.deepin_src_url }}
+        run: |
+          set -euo pipefail
+          sudo -E bash sheng-deepin-rootfs_build.sh \
+            deepin-desktop "${{ inputs.kernel_version }}" "${{ inputs.boot_mode }}" dde
+          ls -la ./*.7z
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepin25-rootfs-${{ inputs.boot_mode }}
+          path: "*.7z"
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Create release
+        if: ${{ !inputs.skip_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: deepin25-${{ github.run_number }}
+          name: "Deepin 25 rootfs build ${{ github.run_number }}"
+          body: |
+            **Deepin 25 (crimson) arm64 rootfs — Xiaomi Pad 6S Pro (sheng)**
+
+            | 项目 | 详情 |
+            |------|------|
+            | 内核 | ${{ inputs.kernel_version }} / ${{ inputs.kernel_channel }} |
+            | 启动模式 | ${{ inputs.boot_mode }} |
+            | 源 | ${{ inputs.deepin_src_url || '官方 arm64 ISO' }} |
+          files: "*.7z"
