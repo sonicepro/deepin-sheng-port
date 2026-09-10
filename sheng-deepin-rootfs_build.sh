@@ -107,18 +107,21 @@ fetch_rootfs() {
             esac
             local loop; loop="$(losetup -fP --show "$img")"
             sleep 1
-            local part=""
+            # Pick the LARGEST ext4 partition (that's the root filesystem).
+            local part="" best=0 sz=0
             for p in "${loop}"p*; do
                 [ -b "$p" ] || continue
                 if [ "$(blkid -o value -s TYPE "$p" 2>/dev/null || true)" = "ext4" ]; then
-                    part="$p"
+                    sz="$(blockdev --getsize64 "$p" 2>/dev/null || echo 0)"
+                    if [ "$sz" -gt "$best" ]; then best="$sz"; part="$p"; fi
                 fi
             done
             if [ -z "$part" ]; then
                 echo "ERROR: no ext4 partition in image" >&2
                 losetup -d "$loop"; return 1
             fi
-            echo "    root partition: ${part}"
+            echo "    root partition: ${part} ($((best/1024/1024)) MiB)"
+            mkdir -p "${tmpd}/mnt"
             mount -o ro "$part" "${tmpd}/mnt"
             rsync -aHAX --numeric-ids "${tmpd}/mnt/" "$dest/"
             umount "${tmpd}/mnt"
