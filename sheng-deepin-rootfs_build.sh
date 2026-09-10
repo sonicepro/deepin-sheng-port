@@ -205,9 +205,10 @@ for MODE in "${BOOTMODES[@]}"; do
     setup_chroot_mounts "$ROOTDIR"
     trap_teardown "$ROOTDIR"
 
-    # 2. Flatten the staged userland into the image (preserve perms/xattrs)
+    # 2. Flatten the staged userland into the image (preserve perms/xattrs).
+    # No --info=progress2: it emits one line per update and blows up the CI log.
     echo "==> Copying userland into ${ROOTFS_IMG}..."
-    rsync -aHAX --numeric-ids --info=progress2 "$STAGE/" "$ROOTDIR/"
+    rsync -aHAX --numeric-ids "$STAGE/" "$ROOTDIR/"
 
     # Free the staging tree before the (space-hungry) sparse pack, unless a
     # later boot mode still needs it.
