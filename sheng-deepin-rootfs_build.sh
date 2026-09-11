@@ -271,6 +271,14 @@ for MODE in "${BOOTMODES[@]}"; do
     echo "==> Copying userland into ${ROOTFS_IMG}..."
     rsync -aHAX --numeric-ids "$STAGE/" "$ROOTDIR/"
 
+    # 2b. The Deepin ISO ships several top-level dirs (/, /etc, /usr, ...) owned
+    # by uid 1001 instead of root. systemd-tmpfiles then refuses to run ("unsafe
+    # path transition"), so /run/linglong & co. are never created and *all*
+    # linglong apps fail to start (QQ, bilibili, ...). Normalize to root.
+    echo "==> Fixing ownership (uid 1001 -> root, outside /home)..."
+    chown 0:0 "$ROOTDIR"
+    find "$ROOTDIR" -xdev -uid 1001 ! -path "$ROOTDIR/home/*" -exec chown 0:0 {} + 2>/dev/null || true
+
     # Free the staging tree before the (space-hungry) sparse pack, unless a
     # later boot mode still needs it.
     MODES_LEFT=$((MODES_LEFT - 1))
