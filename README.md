@@ -140,9 +140,36 @@ fastboot set_active a   # 回 Android
 
 > 上游明确警告：**别用 `qbootctl`**，会变砖。
 
+### 推荐布局：`boot`=Android / `recovery`=Deepin（组合键进 Linux，不用切槽）
+
+比上面“靠 A/B 槽切换”更省心：**正常开机永远是 Android，开机时按组合键进 Deepin**，
+与当前活动槽无关。
+
+| 分区 | 刷什么 | 启动方式 |
+|---|---|---|
+| `boot_a` / `boot_b` | **Android boot** | 正常开机 |
+| `recovery_a` / `recovery_b` | **Deepin boot**（`boot_sheng_dualboot.img`） | **音量上＋电源** |
+| `linux` 分区 | Deepin rootfs（`deepin_*.img`） | Deepin boot 用 `root=PARTLABEL=linux` 挂它 |
+
+```bash
+fastboot set_active a                                  # 正常开机 = Android
+fastboot flash recovery_a boot_sheng_dualboot.img      # 组合键 → Deepin
+fastboot flash recovery_b boot_sheng_dualboot.img      # 任何活动槽都对
+fastboot reboot
+```
+
+之后：**关机 → 按住 `音量上` + `电源` → 进 Deepin**；直接开机 → Android。
+
+> - 组合键因机型而异（音量上+电源 / 音量上单独 / 上下同按），试出你的那个即可。
+> - 会覆盖 `recovery_a/b`（Android 的恢复模式没了；日常与 OTA 之外基本无感）；**可逆**。
+> - 若某槽的 `boot_*` 仍是旧 Deepin boot，记得刷回 Android boot（“两槽都 Android”最稳）。
+> - **升级内核**：`recovery_a` + `recovery_b` 一起换同一次构建的 boot；rootfs 单独刷 `linux`。
+> - ABL 在 recovery 模式可能追加参数（如 `force_normal_boot=0`）——本内核无 ramdisk、
+>   直接吃 `root=PARTLABEL=linux`，实测可正常启动；若冲突再单独做 recovery 专用 boot。
+
 ## 已知注意点
 
-- **磁盘**：完整 Deepin 桌面 rootfs 约 10 GiB，镜像按解压后大小自动定尺寸。
+- **磁盘**：完整 Deepin 桌面 rootfs 约 10–20 GiB（官方 ISO 的完整根约 20 GiB），镜像按解压后大小自动定尺寸。
   workflow 里已加"释放磁盘空间"步骤；`dual` 模式会构建两个镜像、占用更大，
   建议优先 `single`。
 - **源**：默认用 **官方 community arm64 ISO**（飞腾/鲲鹏取向）。可用 `deepin_src_url` 覆盖成其它镜像（脚本自动识别 ISO/tar/img.xz/zip）。
