@@ -32,13 +32,14 @@ source "${SCRIPT_DIR}/lib/rootfs-common.sh"
 IMAGE_SIZE="${IMAGE_SIZE:-}"
 UUID="${UUID:-ee8d3593-59b1-480e-a3b6-4fefb17ee7d8}"   # repo default
 DEEPIN_VERSION="${DEEPIN_VERSION:-25.2.0}"
-# Default source: an INSTALLED Deepin arm64 image (NOT the live ISO). The live
-# ISO's squashfs root tends to hang in the systemd phase when used as a disk
-# root; a board image is a real installed system. Rock5 (.img.xz, ext4 root) is
-# the default; override with DEEPIN_SRC_URL. Alternatives:
-#   .../releases/25.2.0/arm64/deepin-desktop-community-25.2.0-arm64.iso  (live ISO)
-#   .../arm64/rubik-pi-3/FlatBuild_RUBIKPi_deepin25.desktop.zip          (Qualcomm board)
-DEEPIN_SRC_URL="${DEEPIN_SRC_URL:-https://cdimage.deepin.com/arm64/rock5/deepin-crimson-arm64-rock-5-itx-desktop.img.xz}"
+# Default source: the OFFICIAL generic arm64 Deepin userland (community ISO).
+# Its chip list is Phytium/Kunpeng (ARM server SoCs), but the userland is plain
+# ARMv8-A and also runs on SM8550. Override with DEEPIN_SRC_URL. NOTE: this ISO
+# is a *live* image; its squashfs root can hang in the systemd phase when used
+# as a disk root — if that happens, point DEEPIN_SRC_URL at a deepin-ports board
+# image instead, e.g.
+#   https://cdimage.deepin.com/arm64/rock5/deepin-crimson-arm64-rock-5-itx-desktop.img.xz
+DEEPIN_SRC_URL="${DEEPIN_SRC_URL:-https://cdimage.deepin.com/releases/${DEEPIN_VERSION}/arm64/deepin-desktop-community-${DEEPIN_VERSION}-arm64.iso}"
 
 ROOT_PASS="${ROOT_PASS:-1234}"
 USER_PASS="${USER_PASS:-luser}"
