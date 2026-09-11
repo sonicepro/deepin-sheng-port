@@ -1,0 +1,36 @@
+#!/bin/bash
+display_daemon="/usr/lib/deepin-daemon/greeter-display-daemon"
+if [ -x $display_daemon ]; then
+    $display_daemon &
+fi
+xsettingsd_conf="/etc/lightdm/deepin/xsettingsd.conf"
+if [ -e $xsettingsd_conf ]; then
+    xsettingsd -c $xsettingsd_conf &
+else
+    greeter_display_setting_path="/usr/bin/greeter-display-setting"
+    if [ -f $greeter_display_setting_path ]; then
+        scale_env=$(/usr/bin/greeter-display-setting | tail -1)
+        export $scale_env
+    fi
+fi
+
+# 判断是否有脚本需要在greeter之前调用。与更新相关功能
+pre_greeter_out=$(/usr/share/dde-session-shell/greeters.d/pre-greeter)
+exit_code=$?
+exec_path=$(printf "%b\n" "$pre_greeter_out" | tail -1)
+
+if [[ $exit_code == 0 ]]; then
+    echo "Pre-greeter path is: "$exec_path
+    $exec_path
+else
+    echo "There is nothing to do before start greeter"
+fi
+
+# Follow the primary user's UI scale. DDE stores it in ~/.config/deepin/qt-theme.ini
+# (ScreenScaleFactors=); the greeter's own DConfig has no scale so it otherwise
+# falls back to 100% and the login screen looks tiny. Read the user's value so
+# the login screen matches whatever scale the user picked in the control center.
+_scale="$(sed -n 's/^ScreenScaleFactors=//p' /home/luser/.config/deepin/qt-theme.ini 2>/dev/null | head -1)"
+[ -n "$_scale" ] && export QT_SCALE_FACTOR="$_scale"
+
+/usr/bin/lightdm-deepin-greeter

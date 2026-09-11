@@ -392,12 +392,10 @@ EOF
     if [ -f "$_pa" ]; then
         sed -i 's|^[[:space:]]*load-module module-always-sink|#load-module module-always-sink|' "$_pa"
     fi
-    # The login greeter defaults to 100% (its DConfig has no scale key), so on a
-    # 250%-scaled panel the login screen is tiny. Force the greeter's Qt scale.
-    _gd="$ROOTDIR/etc/deepin/greeters.d/lightdm-deepin-greeter"
-    if [ -f "$_gd" ]; then
-        sed -i 's#^/usr/bin/lightdm-deepin-greeter#export QT_SCALE_FACTOR=2.5\n/usr/bin/lightdm-deepin-greeter#' "$_gd"
-    fi
+    # The login greeter otherwise defaults to 100% (its DConfig has no scale key)
+    # -> tiny login screen on a scaled panel. system_files ships a patched
+    # greeters.d/lightdm-deepin-greeter that reads the user's UI scale from
+    # ~/.config/deepin/qt-theme.ini (see the chmod 711 on the home dir below).
     _qt="$ROOTDIR/etc/lightdm/deepin/qt-theme.ini"
     if [ -f "$_qt" ]; then
         sed -i 's/^ScreenScaleFactors=.*/ScreenScaleFactors=2.50/; s/^ScaleLogicalDpi=.*/ScaleLogicalDpi=240,240/' "$_qt"
@@ -418,6 +416,9 @@ EOF
     # 6. Users + hostname + locale
     setup_users "$ROOTDIR" "$ROOT_PASS" "$USER_NAME" "$USER_PASS" \
         "sudo,audio,video,render,input,plugdev,netdev"
+    # The greeter runs as the 'lightdm' user; it must be able to traverse the
+    # home dir to read the user's qt-theme.ini UI scale (see greeters.d patch).
+    chmod 711 "$ROOTDIR/home/$USER_NAME"
     echo "deepin-sheng-${MODE}" > "$ROOTDIR/etc/hostname"
     printf 'LANG=zh_CN.UTF-8\n' > "$ROOTDIR/etc/default/locale"
     printf 'zh_CN.UTF-8\n'       > "$ROOTDIR/etc/locale.conf" 2>/dev/null || true
