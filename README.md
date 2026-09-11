@@ -111,30 +111,9 @@ Android 原本占满整个磁盘，先重分区。进 TWRP：
 
 > ⚠️ 重分区会**清空 Android 的 userdata**（Android 系统本身还在，但应用数据没了）——先备份。
 
-#### 方式一：A/B 槽切换（Android=slot A，Deepin=slot B）
+#### 方式一：`recovery` 分区放 Deepin boot（组合键进 Linux，推荐）
 
-Linux 放 **slot B**（`boot_b` + `linux` 分区），靠 A/B 槽切换。刷入 **`dual` 模式**的产物：
-
-```bash
-fastboot erase dtbo_b
-fastboot flash boot_b boot_sheng_dualboot.img
-fastboot flash linux deepin_25.2.0_dual_<时间>.img
-fastboot set_active b
-fastboot reboot
-```
-
-切换系统（fastboot，不需要 root）：
-
-```bash
-fastboot set_active b   # 进 Linux
-fastboot set_active a   # 回 Android
-```
-
-> 上游明确警告：**别用 `qbootctl`**，会变砖。
-
-#### 方式二：`recovery` 分区放 Deepin boot（组合键进 Linux，推荐）
-
-比上面“靠 A/B 槽切换”更省心：**正常开机永远是 Android，开机时按组合键进 Deepin**，
+比下面“靠 A/B 槽切换”更省心：**正常开机永远是 Android，开机时按组合键进 Deepin**，
 与当前活动槽无关。
 
 | 分区 | 刷什么 | 启动方式 |
@@ -158,6 +137,27 @@ fastboot reboot
 > - **升级内核**：`recovery_a` + `recovery_b` 一起换同一次构建的 boot；rootfs 单独刷 `linux`。
 > - ABL 在 recovery 模式可能追加参数（如 `force_normal_boot=0`）——本内核无 ramdisk、
 >   直接吃 `root=PARTLABEL=linux`，实测可正常启动；若冲突再单独做 recovery 专用 boot。
+
+#### 方式二：A/B 槽切换（Android=slot A，Deepin=slot B）
+
+Linux 放 **slot B**（`boot_b` + `linux` 分区），靠 A/B 槽切换。刷入 **`dual` 模式**的产物：
+
+```bash
+fastboot erase dtbo_b
+fastboot flash boot_b boot_sheng_dualboot.img
+fastboot flash linux deepin_25.2.0_dual_<时间>.img
+fastboot set_active b
+fastboot reboot
+```
+
+切换系统（fastboot，不需要 root）：
+
+```bash
+fastboot set_active b   # 进 Linux
+fastboot set_active a   # 回 Android
+```
+
+> 上游明确警告：**别用 `qbootctl`**，会变砖。
 
 ### 首次启动后扩容
 
