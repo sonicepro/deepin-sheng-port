@@ -400,6 +400,21 @@ EOF
     if [ -f "$_qt" ]; then
         sed -i 's/^ScreenScaleFactors=.*/ScreenScaleFactors=2.50/; s/^ScaleLogicalDpi=.*/ScaleLogicalDpi=240,240/' "$_qt"
     fi
+    # Disable system event sounds by default: the login/logout chime is played by
+    # sound-theme-player directly via ALSA, ignoring the user's PipeWire volume,
+    # so it's jarringly loud. Flip the DConfig default for new users.
+    _xs="$ROOTDIR/usr/share/dsg/configs/org.deepin.dde.daemon/org.deepin.XSettings.json"
+    if [ -f "$_xs" ]; then
+        python3 - "$_xs" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+c = d.get("contents", {})
+if "enable-event-sounds" in c:
+    c["enable-event-sounds"]["value"] = False
+    json.dump(d, open(p, "w"), ensure_ascii=False, indent=4)
+PY
+    fi
     # Audio: re-probe snd-sc8280xp after ADSP, then apply the UCM verb + amps.
     chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable sheng-audio-ucm.service 2>/dev/null || true

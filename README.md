@@ -58,6 +58,8 @@ lib/rootfs-common.sh                # 从上游 vendored 的公共库
 | **重启后没声音**（WirePlumber 早于声卡启动 → 只出 `null-sink`、默认输出指向它） | 注释 `module-always-sink` + 登录自启 `sheng-default-sink`：真实 sink 缺失时**自动重启 PipeWire** 并钉住默认输出 |
 | **蓝牙鼠标连不上**（配对成功，但没输入设备、光标不动） | `uhid`/`hidp`（蓝牙 HID 传输）是内核模块且无人自动加载 → `/etc/modules-load.d/` **开机加载** |
 | **WiFi 每次重启都要重输密码** | ISO 里带着**制作者的 WiFi 连接**（含其 PSK，既泄漏又误导）→ 首次开机 NM 先试它（密码错）失败 → 用户重输又堆出多份同名连接；构建里**删掉 ISO 预置的 NM 连接** |
+| **登录页 UI 特别小**（不跟随桌面缩放 250%） | greeter 的 DConfig 里没有缩放项 → fallback 100%；`system_files` 改成**读用户 `~/.config/deepin/qt-theme.ini` 的 `ScreenScaleFactors`**（构建 `chmod 711 /home/<user>` 让登录器读得到） |
+| **登出提示音特别大**（不跟随用户音量） | 提示音由 `sound-theme-player` **直接走 ALSA**、绕过 PipeWire 音量；构建把 `enable-event-sounds` 默认设为 **false**（关掉系统事件音） |
 | **120W 快充不生效** | 装 `xiaomi-mipps-auth`（内核 `pmic-glink` 节点已在） |
 | **刷完分区没撑满** | fstab 加 `x-systemd.growfs`（首启自动扩容） |
 | **要做单次解压**（GitHub zip + 7z 双层） | 直接输出 sparse `.img`，Release 走 `.img.gz` 分卷 |
