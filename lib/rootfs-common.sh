@@ -135,10 +135,13 @@ setup_getty_ttyMSM0() {
 # ---------------------------------------------------------------------------
 generate_fstab() {
     local rootdir="$1" mode="$2"
+    # x-systemd.growfs: on boot, grow the root filesystem to fill its partition
+    # (so a freshly-flashed image expands to the whole linux/userdata partition
+    # automatically — no manual `resize2fs` needed).
     if [ "$mode" = "dual" ]; then
-        echo "PARTLABEL=linux / ext4 defaults,noatime,errors=remount-ro 0 1" > "$rootdir/etc/fstab"
+        echo "PARTLABEL=linux / ext4 defaults,noatime,errors=remount-ro,x-systemd.growfs 0 1" > "$rootdir/etc/fstab"
     else
-        echo "PARTLABEL=userdata / ext4 defaults,noatime,errors=remount-ro 0 1" > "$rootdir/etc/fstab"
+        echo "PARTLABEL=userdata / ext4 defaults,noatime,errors=remount-ro,x-systemd.growfs 0 1" > "$rootdir/etc/fstab"
     fi
 }
 
