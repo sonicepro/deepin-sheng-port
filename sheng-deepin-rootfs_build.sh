@@ -246,6 +246,20 @@ for MODE in "${BOOTMODES[@]}"; do
     rm -rf "$fwdir"
     echo "    /lib/firmware/qcom:"; ls "$ROOTDIR/lib/firmware/qcom" 2>/dev/null || true
 
+    # 4c. Xiaomi MIPPS 120W charger authentication. The kernel already exposes
+    # the pmic-glink xiaomi sysfs node (request_vdm_cmd); this daemon + its udev
+    # rule perform the handshake so a Xiaomi 120W charger negotiates full power
+    # (otherwise it stays at the standard PPS/PD rate).
+    echo "==> Installing Xiaomi MIPPS auth (120W charging)..."
+    _mipps="$(mktemp -d)/mipps.deb"
+    if wget -nv -O "$_mipps" "${MIPPS_DEB_URL:-https://github.com/code002-2/Xiaomi-pad-6s-pro-Linux/releases/download/mipps/xiaomi-mipps-auth_0.11_arm64.deb}"; then
+        dpkg-deb --fsys-tarfile "$_mipps" | tar -x --keep-directory-symlink -C "$ROOTDIR/"
+        echo "    installed /usr/libexec/xiaomi-mipps-auth (+ service + udev rule)"
+    else
+        echo "    WARN: MIPPS deb download failed; 120W charging auth skipped" >&2
+    fi
+    rm -rf "$(dirname "$_mipps")"
+
     # 5. Device quirks (shared with the other distro scripts)
     # NOTE: no setup_getty_ttyMSM0 here — the kernel disables the geni serial
     # (cmdline qcom_geni_serial.con_enabled=0), so /dev/ttyMSM0 does not exist
