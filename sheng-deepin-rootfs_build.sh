@@ -370,6 +370,13 @@ EOF
     for _u in deepin-face.service deepin-immutable-cleanup.service deepin-immutable-cleanup.timer; do
         ln -sf /dev/null "$ROOTDIR/etc/systemd/system/$_u"
     done
+    # PipeWire-Pulse reads /etc/pulse/default.pa; its `module-always-sink` spawns
+    # a fallback null sink when the card isn't ready yet, which then sticks as
+    # the default output -> no sound. Drop it so the real card is the default.
+    _pa="$ROOTDIR/etc/pulse/default.pa"
+    if [ -f "$_pa" ]; then
+        sed -i 's|^[[:space:]]*load-module module-always-sink|#load-module module-always-sink|' "$_pa"
+    fi
     # Audio: re-probe snd-sc8280xp after ADSP, then apply the UCM verb + amps.
     chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable sheng-audio-ucm.service 2>/dev/null || true

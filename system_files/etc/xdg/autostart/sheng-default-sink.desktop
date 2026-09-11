@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Deepin sheng default audio sink
+Comment=Pin the default PipeWire sink to the real speaker
+Exec=/usr/local/sbin/sheng-default-sink.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
