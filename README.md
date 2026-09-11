@@ -171,5 +171,4 @@ fstab 已带 `x-systemd.growfs`，开机**自动**把根撑满分区（无需手
 
 ## 致谢
 
-感谢三位内核驱动开发者：[code002-2](https://github.com/code002-2)、[map220v](https://github.com/map220v)、[ianchb](https://github.com/ianchb)——
-本项目的内核、固件、ALSA UCM 均源自他们的工作。
+感谢内核驱动开发者：code002-2、map220v、ianchb——本项目的内核、固件均源自他们的工作。
