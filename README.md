@@ -4,9 +4,7 @@
 sheng 内核/固件，做成可 `fastboot` 刷入的镜像。**全部在 GitHub Actions 云端构建**，
 本地只用 `fastboot` 刷机。
 
-本仓库的 sheng 内核/固件驱动均为上游开源社区的无偿贡献 —— 在此感谢
-[code002-2/Xiaomi-pad-6s-pro-Linux](https://github.com/code002-2/Xiaomi-pad-6s-pro-Linux)、
-[map220v](https://github.com/map220v)、[ianchb](https://github.com/ianchb) 等内核驱动开发者。
+本仓库的 sheng 内核/固件驱动均来自上游开源社区 —— 在此感谢 code002-2、 map220v、ianchb 等内核驱动开发者、deepin社区。
 
 > 构建流程、修复清单、硬件支持现状、已知注意点、无线调试 → 见 **[DEVELOPMENT.md](DEVELOPMENT.md)**。
 
