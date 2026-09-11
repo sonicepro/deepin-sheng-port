@@ -44,17 +44,37 @@ lib/rootfs-common.sh                # 从上游 vendored 的公共库
 | 问题 | 修法 |
 |---|---|
 | Deepin 社区源**没有 arm64**（只有 amd64/i386）→ 无法 debootstrap | 取**预构建 arm64 用户态** → 摊平成 ext4 |
+| **官方 ISO 根只解出第一个 squashfs**（`filesystem.squashfs`）→ 少 ~8 GiB、缺壁纸/应用 | 按 `/LIVE/filesystem.module` 解**全部** `filesystem*.squashfs`（主 + extra 叠加） |
+| **live 根 `/var/lib/dpkg` 为空** → apt/dpkg 全废、`openssh-server` 装不上、`accounts-daemon` 失败 | 用 ISO 里的 `filesystem.packages` 清单**重建 `/var/lib/dpkg/status`** |
+| **live 根没有 apt 列表** → `apt-get install` 报“没有可用的软件包” | 写死 Deepin 源 + 装包前 `apt-get update` |
+| **`deepin-face` / `deepin-immutable-cleanup` 失败**（无面容硬件 / ISO 的 ostree 不可变部署，我们是普通 ext4） | `systemctl mask` 掉 |
 | **缺 GPU 固件**（`a740_sqe.fw`/`gmu_gen70200.bin`）→ **黑屏** | 固件 `.deb` 的 blob 从 `/usr/lib/` **搬到 `/lib/firmware/`**，再叠加完整固件仓库 |
 | **WiFi（ath12k WCN7850）** 起不来 | `fix_wifi_firmware`：`board-2.bin` → `board.bin` 伪装 |
 | **`qrtr-ns.service` 失败** | 装 `qrtr` 包 + `ConditionPathExists` 兜底（没有就跳过） |
 | **`getty@ttyMSM0` 失败** | 去掉（内核命令行 `con_enabled=0`，该串口不存在） |
 | **`usb-gadget-net` 失败**（`203/EXEC`） | `ExecStart=/bin/bash …` + 无 UDC 时 `ConditionPathExistsGlob` 跳过 |
 | **没声音**（WirePlumber 走 ACP 不走 UCM → Dummy 输出） | 打补丁 `use-acp=false` + `sheng-audio-rebind`（ADSP 竞态后重探）+ `sheng-audio-ucm`（应用 UCM + 开 6 个 cs35l43 功放） |
+| **重启后没声音**（WirePlumber 早于声卡启动 → 只出 `null-sink`、默认输出指向它） | 注释 `module-always-sink` + 登录自启 `sheng-default-sink`：真实 sink 缺失时**自动重启 PipeWire** 并钉住默认输出 |
 | **120W 快充不生效** | 装 `xiaomi-mipps-auth`（内核 `pmic-glink` 节点已在） |
 | **刷完分区没撑满** | fstab 加 `x-systemd.growfs`（首启自动扩容） |
 | **要做单次解压**（GitHub zip + 7z 双层） | 直接输出 sparse `.img`，Release 走 `.img.gz` 分卷 |
 | **屏幕键盘难用** | dconf 系统默认：onboard 停靠底部 + Droid 主题 + 自动弹出 |
 | DNS/下载/挂载各种小坑 | chroot DNS、保留 URL 扩展名 + magic 嗅探、`mkdir` 挂载点、选最大 ext4、去掉 `--info=progress2` |
+
+### 硬件支持现状
+
+内核/固件全部来自同一套 sheng mainline（全注入，**驱动层已同步**）；下列差异都是
+**mainline 上游对个别外设支持不全**，非本镜像缺驱动。
+
+| 硬件 | 状态 |
+|---|---|
+| 触摸 / WiFi / 蓝牙 | ✅ |
+| 音频（含开机自愈） | ✅ |
+| 120W 充电（MIPPS 认证） | ✅ |
+| GPU / 显示 | ✅ |
+| **传感器**（重力/陀螺/光感/霍尔） | ❌ 挂在 ADSP **SSC** 后面，需 `libssc` + SSC 版 `iio-sensor-proxy`（任何现成仓库都没有，得自己编）；配置文件 `sheng-sensors` 已在 |
+| **相机** | ⚠️ 驱动/媒体图/传感器绑定都在，`libcamera` 也能识别并**抓原始帧**；但彩色卡在 libcamera 的 debayer **不支持该传感器 10-bit（R10_CSI2P）格式**。DDE 相机应用是 linglong 应用、假设高通私有栈，mainline 上多半用不了 |
+| **触控笔**（小米焦点笔） | ❌ 内核只有**充电/配对**侧（`pen_*` @ pmic-glink），**无书写输入**（触摸数字转换器不报笔，私有协议未解码） |
 
 ### 已知问题（未解决）
 
@@ -62,6 +82,7 @@ lib/rootfs-common.sh                # 从上游 vendored 的公共库
 |---|---|
 | **登录界面白框** | DDE greeter 拿不到 Application Manager/主题（非原厂硬件的老毛病）；已开 autologin，不影响进桌面 |
 | **maliit 屏幕键盘** | Wayland 优先，X11 下窗口显示不了；X11 只能用 onboard |
+| **传感器 / 相机 / 触控笔** | 见上「硬件支持现状」——mainline 上游限制 |
 
 ## 怎么跑
 
