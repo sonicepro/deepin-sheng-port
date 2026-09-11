@@ -171,5 +171,5 @@ fstab 已带 `x-systemd.growfs`，开机**自动**把根撑满分区（无需手
 
 ## 致谢
 
-内核、固件、ALSA UCM 均源自上游 [code002-2/Xiaomi-pad-6s-pro-Linux](https://github.com/code002-2/Xiaomi-pad-6s-pro-Linux)
+内核、固件、ALSA UCM 均源自上游 [code002-2](https://github.com/code002-2)
 与 [map220v](https://github.com/map220v) / [ianchb](https://github.com/ianchb)。
