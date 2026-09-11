@@ -354,6 +354,13 @@ EOF
     configure_touchscreen "$ROOTDIR"
     fix_wifi_firmware "$ROOTDIR"
 
+    # The Deepin ISO ships the *builder's* NetworkManager connections (and their
+    # WiFi PSKs!) under /etc/NetworkManager/system-connections. Remove them:
+    # shipping someone else's credentials is a leak, and on first boot NM tries
+    # the (wrong) factory profile first, fails, and prompts the user — who then
+    # piles up duplicate profiles for the same SSID (-> keeps re-asking).
+    rm -f "$ROOTDIR"/etc/NetworkManager/system-connections/*.nmconnection 2>/dev/null || true
+
     # 5c. Device system files + device services.
     if [ -d "$SCRIPT_DIR/system_files" ]; then
         cp -a "$SCRIPT_DIR/system_files/." "$ROOTDIR/"
