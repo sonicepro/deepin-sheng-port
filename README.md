@@ -26,6 +26,44 @@ lib/rootfs-common.sh                # 从上游 vendored 的公共库
 .github/workflows/build-deepin.yml  # 自包含 CI workflow
 ```
 
+## 构建脚本做了什么 / 修复了哪些问题
+
+### 流水线（`sheng-deepin-rootfs_build.sh`）
+
+1. **取源** — 下载 Deepin arm64 用户态（默认官方 community arm64 ISO；也支持 `img.xz`/`tar`/`zip`，按扩展名 + magic 自动识别）
+2. **解出用户态** — `unsquashfs`（ISO）/ `tar -x` / **loop 挂载最大 ext4 分区后 `rsync`**（板级镜像）/ `unzip`
+3. **定尺寸** — 镜像 = 解压后大小 **+2 GiB**（给 rsync 留余量）
+4. **每个启动模式**（`single`/`dual`/`all`）— 建 ext4 镜像 → 挂载 → 灌入用户态
+5. **注入** sheng 内核 `.deb`、**固件**、**MIPPS**
+6. **设备修复 + 设备服务**（见下表；含 `system_files/` 里的脚本/unit + dconf 默认）
+7. **用户 / 主机名 / 中文 locale / 时区 / lightdm 自动登录 / fstab**
+8. **转 Android sparse `.img` → gzip** → `deepin_<ver>_<mode>_<ts>.img.gz`
+
+### 修复清单
+
+| 问题 | 修法 |
+|---|---|
+| Deepin 社区源**没有 arm64**（只有 amd64/i386）→ 无法 debootstrap | 取**预构建 arm64 用户态** → 摊平成 ext4 |
+| **缺 GPU 固件**（`a740_sqe.fw`/`gmu_gen70200.bin`）→ **黑屏** | 固件 `.deb` 的 blob 从 `/usr/lib/` **搬到 `/lib/firmware/`**，再叠加完整固件仓库 |
+| **WiFi（ath12k WCN7850）** 起不来 | `fix_wifi_firmware`：`board-2.bin` → `board.bin` 伪装 |
+| **`qrtr-ns.service` 失败** | 装 `qrtr` 包 + `ConditionPathExists` 兜底（没有就跳过） |
+| **`getty@ttyMSM0` 失败** | 去掉（内核命令行 `con_enabled=0`，该串口不存在） |
+| **`usb-gadget-net` 失败**（`203/EXEC`） | `ExecStart=/bin/bash …` + 无 UDC 时 `ConditionPathExistsGlob` 跳过 |
+| **没声音**（WirePlumber 走 ACP 不走 UCM → Dummy 输出） | 打补丁 `use-acp=false` + `sheng-audio-rebind`（ADSP 竞态后重探）+ `sheng-audio-ucm`（应用 UCM + 开 6 个 cs35l43 功放） |
+| **120W 快充不生效** | 装 `xiaomi-mipps-auth`（内核 `pmic-glink` 节点已在） |
+| **刷完分区没撑满** | fstab 加 `x-systemd.growfs`（首启自动扩容） |
+| **要做单次解压**（GitHub zip + 7z 双层） | 直接输出 sparse `.img`，Release 走 `.img.gz` 分卷 |
+| **屏幕键盘难用** | dconf 系统默认：onboard 停靠底部 + Droid 主题 + 自动弹出 |
+| DNS/下载/挂载各种小坑 | chroot DNS、保留 URL 扩展名 + magic 嗅探、`mkdir` 挂载点、选最大 ext4、去掉 `--info=progress2` |
+
+### 已知问题（未解决）
+
+| 问题 | 现状 |
+|---|---|
+| **live ISO 卡 systemd** | 官方 ISO 是 live 根，当磁盘根可能卡；卡了就把 `deepin_src_url` 换成已安装的板级镜像（如 rock5 `.img.xz`） |
+| **登录界面白框** | DDE greeter 拿不到 Application Manager/主题（非原厂硬件的老毛病）；已开 autologin，不影响进桌面 |
+| **maliit 屏幕键盘** | Wayland 优先，X11 下窗口显示不了；X11 只能用 onboard |
+
 ## 怎么跑
 
 1. 进本仓库的 **Actions** 页面；
@@ -92,7 +130,7 @@ fastboot set_active b
 fastboot reboot
 ```
 
-首次启动后扩容：`sudo resize2fs /dev/sda30`（`linux` 分区）。
+首次启动后扩容：fstab 已带 `x-systemd.growfs`，开机自动撑满 `linux` 分区（根设备一般是 `/dev/sda31`；旧镜像才需手动 `sudo resize2fs <根设备>`）。
 
 **切换系统**（fastboot，不需要 root）：
 
@@ -108,14 +146,12 @@ fastboot set_active a   # 回 Android
 - **磁盘**：完整 Deepin 桌面 rootfs 约 10 GiB，镜像按解压后大小自动定尺寸。
   workflow 里已加"释放磁盘空间"步骤；`dual` 模式会构建两个镜像、占用更大，
   建议优先 `single`。
-- **源**：默认用 **rock5 已安装镜像**（`.img.xz`）。官方 arm64 ISO 的 squashfs 是
-  **live** 系统，当磁盘根常卡在 systemd 阶段，**不推荐**（可用 `deepin_src_url` 覆盖，
-  脚本自动识别 ISO/tar/img.xz/zip）。
+- **源**：默认用 **官方 community arm64 ISO**（飞腾/鲲鹏取向）。已安装的板级镜像更稳——官方 ISO 的 squashfs 是 **live** 系统，当磁盘根常卡在 systemd 阶段；卡了就 `deepin_src_url` 覆盖成板级 `.img.xz`（如 rock5），脚本自动识别 ISO/tar/img.xz/zip。
 - **无 initramfs**：本方案复用的 `boot_sheng_*.img` **不带 ramdisk**，依赖内核内置
   UFS/ext4。
 - **DDE 会话**：脚本 best-effort 配了 lightdm 自动登录；若 Deepin 25 用的不是
   lightdm，该文件无害。
-- **首次启动**：视分区可能需要 `sudo resize2fs /dev/sda30` 扩容。
+- **首次启动**：fstab 已带 `x-systemd.growfs`，开机**自动**把根撑满分区（无需手动）。根分区是 `PARTLABEL=linux`（如 `/dev/sda31`，**不是** `sda30`）；只有旧镜像才需手动 `sudo resize2fs <根设备>`。
 
 ## USB 网络 / SSH（无需显示即可调试）
 
