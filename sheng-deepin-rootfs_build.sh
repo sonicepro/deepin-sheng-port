@@ -383,6 +383,10 @@ EOF
     # USB gadget network (self-skips on units with no UDC).
     chroot "$ROOTDIR" systemctl enable usb-gadget-net.service 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable ssh 2>/dev/null || chroot "$ROOTDIR" systemctl enable sshd 2>/dev/null || true
+    # Bluetooth HID (mice/keyboards) goes through uhid (BLE) / hidp (BR-EDR);
+    # both are modules and auto-loaded by nothing, so after pairing a mouse can't
+    # connect. Load them at boot.
+    printf 'uhid\nhidp\n' > "$ROOTDIR/etc/modules-load.d/sheng-bluetooth-hid.conf"
     printf '\nDeepin (sheng)： ssh %s@<平板IP>  (走 WiFi；或 USB 网络 192.168.42.15)\n\n' "$USER_NAME" \
         > "$ROOTDIR/etc/issue"
 
