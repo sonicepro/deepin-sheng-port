@@ -385,6 +385,12 @@ EOF
     for _u in deepin-face.service deepin-immutable-cleanup.service deepin-immutable-cleanup.timer; do
         ln -sf /dev/null "$ROOTDIR/etc/systemd/system/$_u"
     done
+    # This is a plain ext4 root, not a Deepin "immutable" (ostree) deployment, but
+    # the ISO ships /etc/deepin-immutable-ctl which makes lastore-daemon treat the
+    # system as immutable and run ostree update steps that fail (no
+    # /sysroot/ostree/repo) -> the DDE updater can't download. Remove it so
+    # lastore uses the normal apt path.
+    rm -rf "$ROOTDIR/etc/deepin-immutable-ctl"
     # PipeWire-Pulse reads /etc/pulse/default.pa; its `module-always-sink` spawns
     # a fallback null sink when the card isn't ready yet, which then sticks as
     # the default output -> no sound. Drop it so the real card is the default.
