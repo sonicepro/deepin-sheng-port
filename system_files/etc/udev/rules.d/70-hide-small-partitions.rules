@@ -1,0 +1,8 @@
+# Hide sheng's sub-1GiB partitions / removable stubs from udisks2
+# (and therefore the deepin file manager's "Computer" view).
+# sheng: sda1..sda27 are all under 1GiB; sda28=11G sda29=119G sda30=1.2G sda31=111G.
+KERNEL=="sda[1-9]", ENV{UDISKS_IGNORE}="1"
+KERNEL=="sda1[0-9]", ENV{UDISKS_IGNORE}="1"
+KERNEL=="sda2[0-7]", ENV{UDISKS_IGNORE}="1"
+KERNEL=="sd[b-z]", ENV{UDISKS_IGNORE}="1"
+KERNEL=="sd[b-z][0-9]*", ENV{UDISKS_IGNORE}="1"
