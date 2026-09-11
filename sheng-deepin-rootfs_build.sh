@@ -362,6 +362,14 @@ EOF
         sed -i '/api\.alsa\.use-acp/ s/= true/= false/' "$_wp"
     fi
     chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y openssh-server" >/dev/null 2>&1 || true
+    # Mask units that can't work here (would otherwise show as [FAILED]):
+    #  * deepin-face              — no face-auth hardware on sheng
+    #  * deepin-immutable-cleanup — the ISO root is an ostree/immutable
+    #                               deployment; ours is a plain ext4, so it fails
+    mkdir -p "$ROOTDIR/etc/systemd/system"
+    for _u in deepin-face.service deepin-immutable-cleanup.service deepin-immutable-cleanup.timer; do
+        ln -sf /dev/null "$ROOTDIR/etc/systemd/system/$_u"
+    done
     # Audio: re-probe snd-sc8280xp after ADSP, then apply the UCM verb + amps.
     chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable sheng-audio-ucm.service 2>/dev/null || true
