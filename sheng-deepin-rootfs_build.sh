@@ -391,6 +391,9 @@ EOF
     # /sysroot/ostree/repo) -> the DDE updater can't download. Remove it so
     # lastore uses the normal apt path.
     rm -rf "$ROOTDIR/etc/deepin-immutable-ctl"
+    # lastore also invokes "deepin-immutable-ctl upgrade" (ostree) when the ctl
+    # binary is present; drop it so the updater uses the plain apt download path.
+    rm -f "$ROOTDIR/usr/sbin/deepin-immutable-ctl"
     # PipeWire-Pulse reads /etc/pulse/default.pa; its `module-always-sink` spawns
     # a fallback null sink when the card isn't ready yet, which then sticks as
     # the default output -> no sound. Drop it so the real card is the default.
