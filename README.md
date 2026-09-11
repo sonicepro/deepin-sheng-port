@@ -39,16 +39,41 @@ Release 下载。
 
 ## 合并
 
-**Releases（分卷，一条命令）**：
+**Linux / macOS**
+
+Releases（分卷，拼接 + 解压一条命令）：
 
 ```bash
 cat deepin_*.img.gz.part.* | gzip -d > deepin.img
 ```
 
-**Artifacts（zip 里是单个 `.img.gz`）**：
+Artifacts（zip 里是单个 `.img.gz`）：
 
 ```bash
-gzip -d deepin_*.img.gz      # 7-Zip / Windows 也可直接解 .gz
+gzip -d deepin_*.img.gz
+```
+
+**Windows（CMD / PowerShell）**
+
+Releases（分卷，用 `copy /b` 拼接，在分卷所在目录执行）：
+
+```bat
+copy /b deepin_*.img.gz.part.* deepin.img.gz
+```
+
+> 若担心通配拼接顺序，也可显式按序列出各分卷：
+> ```bat
+> copy /b deepin_*.img.gz.part.000+deepin_*.img.gz.part.001+deepin_*.img.gz.part.002+deepin_*.img.gz.part.003+deepin_*.img.gz.part.004+deepin_*.img.gz.part.005 deepin.img.gz
+> ```
+
+Windows 解压 `.gz`（任选其一，解出 `deepin.img`）：
+
+```bat
+:: Win10 1803+ 自带 tar
+tar -xf deepin.img.gz
+
+:: 或装 7-Zip
+7z x deepin.img.gz
 ```
 
 解出来就是 Android sparse rootfs `.img`（magic `3aff26ed`），刷机直接用。
@@ -60,12 +85,16 @@ gzip -d deepin_*.img.gz      # 7-Zip / Windows 也可直接解 .gz
 ### 单系统模式（刷 `userdata`，抹掉 Android）
 
 ```bash
+fastboot getvar current-slot        # 查看当前活动槽位（一般为 a）
 fastboot erase dtbo_b
 fastboot flash boot_b boot_sheng_singleboot.img
+fastboot set_active b               # ★ 切到 B 槽；漏了这步刷完也不进 Deepin
 fastboot erase userdata
 fastboot flash userdata deepin_25.2.0_single_<时间>.img
 fastboot reboot
 ```
+
+> 单系统把 Deepin 放 **slot B**，`boot_b` 刷完必须 `set_active b` 才会从 B 槽启动。
 
 ### 双系统模式（Android + Linux 共存）
 
@@ -115,9 +144,9 @@ fastboot set_active a   # 回 Android
 | `linux` 分区 | Deepin rootfs（`deepin_*.img`） | Deepin boot 用 `root=PARTLABEL=linux` 挂它 |
 
 ```bash
-fastboot set_active a                                  # 正常开机 = Android
-fastboot flash recovery_a boot_sheng_dualboot.img      # 组合键 → Deepin
-fastboot flash recovery_b boot_sheng_dualboot.img      # 任何活动槽都对
+fastboot flash recovery_a boot_sheng_dualboot.img      # 先把 Deepin boot 刷进 recovery
+fastboot flash recovery_b boot_sheng_dualboot.img      # 两槽都刷（任何活动槽都对）
+fastboot set_active a                                  # 再让正常开机 = Android
 fastboot reboot
 ```
 
