@@ -2,12 +2,15 @@
 Description=USB RNDIS/ECM gadget network (192.168.42.15)
 After=sys-kernel-config.mount network-pre.target
 Wants=sys-kernel-config.mount
+# No UDC (USB device controller) => the port is in host mode / not connected;
+# skip instead of failing (would otherwise show as a failed unit).
+ConditionPathExistsGlob=/sys/class/udc/*
 Before=network-pre.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/usb-gadget-net.sh
+ExecStart=/bin/bash /usr/local/sbin/usb-gadget-net.sh
 
 [Install]
 WantedBy=multi-user.target

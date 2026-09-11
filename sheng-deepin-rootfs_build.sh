@@ -247,7 +247,9 @@ for MODE in "${BOOTMODES[@]}"; do
     echo "    /lib/firmware/qcom:"; ls "$ROOTDIR/lib/firmware/qcom" 2>/dev/null || true
 
     # 5. Device quirks (shared with the other distro scripts)
-    setup_getty_ttyMSM0 "$ROOTDIR"
+    # NOTE: no setup_getty_ttyMSM0 here — the kernel disables the geni serial
+    # (cmdline qcom_geni_serial.con_enabled=0), so /dev/ttyMSM0 does not exist
+    # and a getty on it just shows up as a failed unit.
     # qrtr-ns: the unit the shared lib creates runs /usr/bin/qrtr-ns, which a
     # stock Deepin rootfs lacks -> the unit fails at boot. Install the package
     # (Debian: 'qrtr') if available, and add a ConditionPathExists safety net so
@@ -262,15 +264,19 @@ for MODE in "${BOOTMODES[@]}"; do
     configure_touchscreen "$ROOTDIR"
     fix_wifi_firmware "$ROOTDIR"
 
-    # 5c. Device system files + sshd, so the tablet is reachable at 192.168.42.15
-    # over the USB-C cable even with no display (USB RNDIS/ECM gadget).
+    # 5c. Device system files + device services.
     if [ -d "$SCRIPT_DIR/system_files" ]; then
         cp -a "$SCRIPT_DIR/system_files/." "$ROOTDIR/"
+        # git may not preserve the exec bit -> make the helper scripts runnable
+        chmod 0755 "$ROOTDIR"/usr/local/sbin/*.sh 2>/dev/null || true
     fi
     chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y openssh-server" >/dev/null 2>&1 || true
+    # Audio: re-probe snd-sc8280xp once the ADSP is up (SM8550 audio race).
+    chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
+    # USB gadget network (self-skips on units with no UDC).
     chroot "$ROOTDIR" systemctl enable usb-gadget-net.service 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable ssh 2>/dev/null || chroot "$ROOTDIR" systemctl enable sshd 2>/dev/null || true
-    printf '\nDeepin (sheng) USB 网络： ssh %s@192.168.42.15  (Windows 侧网卡设 192.168.42.1/24)\n\n' "$USER_NAME" \
+    printf '\nDeepin (sheng)： ssh %s@<平板IP>  (走 WiFi；或 USB 网络 192.168.42.15)\n\n' "$USER_NAME" \
         > "$ROOTDIR/etc/issue"
 
     # 6. Users + hostname + locale

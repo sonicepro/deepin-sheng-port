@@ -1,0 +1,13 @@
+[Unit]
+Description=Re-probe snd-sc8280xp after ADSP is ready (SM8550 audio race workaround)
+Documentation=https://github.com/alghiffaryfa19/Linux-xiaomi-sheng
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /usr/local/sbin/sheng-audio-rebind.sh
+
+[Install]
+WantedBy=multi-user.target
