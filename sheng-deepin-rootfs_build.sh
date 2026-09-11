@@ -392,6 +392,16 @@ EOF
     if [ -f "$_pa" ]; then
         sed -i 's|^[[:space:]]*load-module module-always-sink|#load-module module-always-sink|' "$_pa"
     fi
+    # The login greeter defaults to 100% (its DConfig has no scale key), so on a
+    # 250%-scaled panel the login screen is tiny. Force the greeter's Qt scale.
+    _gd="$ROOTDIR/etc/deepin/greeters.d/lightdm-deepin-greeter"
+    if [ -f "$_gd" ]; then
+        sed -i 's#^/usr/bin/lightdm-deepin-greeter#export QT_SCALE_FACTOR=2.5\n/usr/bin/lightdm-deepin-greeter#' "$_gd"
+    fi
+    _qt="$ROOTDIR/etc/lightdm/deepin/qt-theme.ini"
+    if [ -f "$_qt" ]; then
+        sed -i 's/^ScreenScaleFactors=.*/ScreenScaleFactors=2.50/; s/^ScaleLogicalDpi=.*/ScaleLogicalDpi=240,240/' "$_qt"
+    fi
     # Audio: re-probe snd-sc8280xp after ADSP, then apply the UCM verb + amps.
     chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable sheng-audio-ucm.service 2>/dev/null || true
