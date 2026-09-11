@@ -270,9 +270,17 @@ for MODE in "${BOOTMODES[@]}"; do
         # git may not preserve the exec bit -> make the helper scripts runnable
         chmod 0755 "$ROOTDIR"/usr/local/sbin/*.sh 2>/dev/null || true
     fi
+    # WirePlumber on Deepin defaults to ACP instead of UCM, so this card exposes
+    # no UCM profile (only "off"/"pro-audio") -> PipeWire falls back to a Dummy
+    # output. Flip it to the UCM path so the real ALSA sinks appear.
+    _wp="$ROOTDIR/usr/share/wireplumber/scripts/monitors/alsa.lua"
+    if [ -f "$_wp" ]; then
+        sed -i '/api\.alsa\.use-acp/ s/= true/= false/' "$_wp"
+    fi
     chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y openssh-server" >/dev/null 2>&1 || true
-    # Audio: re-probe snd-sc8280xp once the ADSP is up (SM8550 audio race).
+    # Audio: re-probe snd-sc8280xp after ADSP, then apply the UCM verb + amps.
     chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
+    chroot "$ROOTDIR" systemctl enable sheng-audio-ucm.service 2>/dev/null || true
     # USB gadget network (self-skips on units with no UDC).
     chroot "$ROOTDIR" systemctl enable usb-gadget-net.service 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable ssh 2>/dev/null || chroot "$ROOTDIR" systemctl enable sshd 2>/dev/null || true

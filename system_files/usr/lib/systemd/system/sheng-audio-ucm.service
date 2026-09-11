@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply ALSA UCM HiFi + enable cs35l43 speaker amps (sheng)
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /usr/local/sbin/sheng-audio-ucm.sh
+
+[Install]
+WantedBy=multi-user.target
