@@ -279,6 +279,15 @@ for MODE in "${BOOTMODES[@]}"; do
     # 3. DNS inside chroot
     setup_dns "$ROOTDIR" 223.5.5.5 1.1.1.1 8.8.8.8
 
+    # 3b. Ensure a usable apt repo + refresh the lists. The Deepin live root
+    # ships NO /var/lib/apt/lists (and its sources may be live-specific), so the
+    # `apt-get install` steps below would otherwise fail with "no such package".
+    cat > "$ROOTDIR/etc/apt/sources.list" <<'EOF'
+deb https://community-packages.deepin.com/beige/ crimson main commercial community
+EOF
+    echo "==> apt-get update (populate package lists)..."
+    chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update" >/dev/null 2>&1 || true
+
     # 4. Inject the sheng kernel .deb (placed in cwd by the workflow)
     echo "==> Injecting sheng kernel .deb..."
     inject_deb_kernel "$ROOTDIR" "./*.deb"
