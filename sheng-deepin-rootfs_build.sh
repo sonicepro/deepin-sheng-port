@@ -83,13 +83,36 @@ fetch_rootfs() {
         *.iso)
             local mnt; mnt="$(mktemp -d)"
             mount -o loop,ro "$src" "$mnt"
-            local sq; sq="$(find "$mnt" -maxdepth 6 -name 'filesystem.squashfs' | head -1)"
-            if [ -z "$sq" ]; then
+            # Deepin's live root is the UNION of several squashfs listed in
+            # /LIVE/filesystem.module (e.g. filesystem.squashfs +
+            # filesystem-extra.squashfs). Extract ALL of them, in module order —
+            # extracting only filesystem.squashfs yields a root missing ~8 GiB
+            # (the "extra" overlay: wallpapers, apps, ...).
+            local modf; modf="$(find "$mnt" -maxdepth 6 \( -iname 'filesystem.module' -o -iname 'filesystem-module' \) 2>/dev/null | head -1)"
+            local sqs=() f n
+            if [ -n "$modf" ] && [ -s "$modf" ]; then
+                while IFS= read -r n; do
+                    n="$(printf '%s' "$n" | tr -d '\r')"
+                    [ -n "$n" ] || continue
+                    f="$(dirname "$modf")/$n"
+                    [ -f "$f" ] && sqs+=("$f")
+                done < "$modf"
+            fi
+            if [ "${#sqs[@]}" -eq 0 ]; then
+                while IFS= read -r f; do sqs+=("$f"); done < <(find "$mnt" -maxdepth 6 -iname 'filesystem*.squashfs' | sort)
+            fi
+            if [ "${#sqs[@]}" -eq 0 ]; then
                 echo "ERROR: no filesystem.squashfs found inside ISO" >&2
                 umount "$mnt"; rmdir "$mnt"; return 1
             fi
-            echo "    squashfs: ${sq#"$mnt"/}"
-            unsquashfs -f -d "$dest" "$sq"
+            local sq
+            for sq in "${sqs[@]}"; do
+                echo "    squashfs: ${sq#"$mnt"/}"
+                unsquashfs -f -d "$dest" "$sq"
+            done
+            # Keep the live package manifest so we can rebuild the dpkg database.
+            local pl; pl="$(find "$mnt" -maxdepth 6 -iname 'filesystem.packages' | head -1)"
+            [ -n "$pl" ] && cp "$pl" "$dest/.live-packages"
             umount "$mnt"; rmdir "$mnt"
             ;;
         *.tar.xz|*.tar.gz|*.tar.zst|*.tgz)
@@ -170,10 +193,49 @@ autologin-user-timeout=0
 EOF
 }
 
+# --- Rebuild the dpkg database when the source shipped none -----------------
+# Deepin's live ISO has an empty/absent /var/lib/dpkg, which makes dpkg/apt
+# unusable (every chroot apt step below would then no-op). Reconstruct a minimal
+# database from the live package manifest (saved as .live-packages by
+# fetch_rootfs) and mask the live-boot/config machinery.
+rebuild_dpkg_db() {
+    local root="$1"
+    [ -s "$root/var/lib/dpkg/status" ] && return 0
+    [ -f "$root/.live-packages" ] || return 0
+
+    echo "==> Rebuilding dpkg database from the live package manifest..."
+    mkdir -p "$root/var/lib/dpkg/info" "$root/var/lib/dpkg/updates" \
+             "$root/var/lib/dpkg/triggers" "$root/var/lib/dpkg/alternatives" \
+             "$root/var/lib/dpkg/parts" "$root/var/lib/apt/lists/partial" \
+             "$root/var/cache/apt/archives/partial"
+    : > "$root/var/lib/dpkg/status"
+    local name ver arch
+    while IFS=$'\t' read -r name ver; do
+        [ -n "$name" ] || continue
+        arch="arm64"
+        case "$name" in *:*) arch="${name##*:}"; name="${name%%:*}";; esac
+        printf 'Package: %s\nStatus: install ok installed\nPriority: optional\nSection: unknown\nInstalled-Size: 0\nMaintainer: unknown\nArchitecture: %s\nVersion: %s\nDescription: (from live manifest)\n\n' \
+            "$name" "$arch" "$ver" >> "$root/var/lib/dpkg/status"
+    done < "$root/.live-packages"
+    rm -f "$root/.live-packages"
+    echo "    dpkg status: $(grep -c '^Package:' "$root/var/lib/dpkg/status" 2>/dev/null || echo 0) packages"
+
+    # Mask the live-boot/live-config machinery so it doesn't run on a disk root.
+    local u
+    for u in live-config.service live-config-systemd.service live-boot.service live-tools.service; do
+        if [ -e "$root/lib/systemd/system/$u" ] || [ -e "$root/usr/lib/systemd/system/$u" ] || [ -e "$root/etc/systemd/system/$u" ]; then
+            mkdir -p "$root/etc/systemd/system"
+            ln -sf /dev/null "$root/etc/systemd/system/$u"
+        fi
+    done
+    rm -rf "$root/lib/live" "$root/usr/lib/live"
+}
+
 # --- Extract once up front (so we can size the image to fit) -----------------
 echo "==> Extracting Deepin userland..."
 STAGE="$(mktemp -d)"
 fetch_rootfs "$src_file" "$STAGE"
+rebuild_dpkg_db "$STAGE"
 rm -rf "$DLDIR"          # reclaim the downloaded archive
 extracted_mb=$(du -sm "$STAGE" | cut -f1)
 echo "==> Extracted rootfs: ${extracted_mb} MiB"
