@@ -1,0 +1,19 @@
+# sheng defaults: make the on-screen keyboard (onboard) touch-friendly.
+# Docks it full-width at the bottom, clean theme, auto-shows on text focus.
+[org/onboard]
+theme='Droid'
+layout='Compact'
+use-system-defaults=false
+
+[org/onboard/window]
+docking-enabled=true
+docking-edge='bottom'
+force-to-top=true
+
+[org/onboard/auto-show]
+enabled=true
+hide-on-key-press=true
+
+[org/onboard/keyboard]
+touch-input='multi'
+audio-feedback-enabled=false

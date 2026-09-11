@@ -283,6 +283,8 @@ for MODE in "${BOOTMODES[@]}"; do
         cp -a "$SCRIPT_DIR/system_files/." "$ROOTDIR/"
         # git may not preserve the exec bit -> make the helper scripts runnable
         chmod 0755 "$ROOTDIR"/usr/local/sbin/*.sh 2>/dev/null || true
+        # compile the dconf system defaults (on-screen keyboard config, etc.)
+        chroot "$ROOTDIR" dconf update 2>/dev/null || true
     fi
     # WirePlumber on Deepin defaults to ACP instead of UCM, so this card exposes
     # no UCM profile (only "off"/"pro-audio") -> PipeWire falls back to a Dummy
