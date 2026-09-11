@@ -427,6 +427,10 @@ PY
     # Audio: re-probe snd-sc8280xp after ADSP, then apply the UCM verb + amps.
     chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable sheng-audio-ucm.service 2>/dev/null || true
+    # Suspend state: sheng/SM8550's "deep" suspend self-wakes within seconds
+    # (worst while charging, where DDE "待机" blanks the screen only to light up
+    # again). Pin s2idle, which sleeps correctly.
+    chroot "$ROOTDIR" systemctl enable sheng-mem-sleep.service 2>/dev/null || true
     # USB gadget network (self-skips on units with no UDC).
     chroot "$ROOTDIR" systemctl enable usb-gadget-net.service 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable ssh 2>/dev/null || chroot "$ROOTDIR" systemctl enable sshd 2>/dev/null || true
