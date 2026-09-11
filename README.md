@@ -60,7 +60,6 @@ lib/rootfs-common.sh                # 从上游 vendored 的公共库
 
 | 问题 | 现状 |
 |---|---|
-| **live ISO 卡 systemd** | 官方 ISO 是 live 根，当磁盘根可能卡；卡了就把 `deepin_src_url` 换成已安装的板级镜像（如 rock5 `.img.xz`） |
 | **登录界面白框** | DDE greeter 拿不到 Application Manager/主题（非原厂硬件的老毛病）；已开 autologin，不影响进桌面 |
 | **maliit 屏幕键盘** | Wayland 优先，X11 下窗口显示不了；X11 只能用 onboard |
 
@@ -146,7 +145,7 @@ fastboot set_active a   # 回 Android
 - **磁盘**：完整 Deepin 桌面 rootfs 约 10 GiB，镜像按解压后大小自动定尺寸。
   workflow 里已加"释放磁盘空间"步骤；`dual` 模式会构建两个镜像、占用更大，
   建议优先 `single`。
-- **源**：默认用 **官方 community arm64 ISO**（飞腾/鲲鹏取向）。已安装的板级镜像更稳——官方 ISO 的 squashfs 是 **live** 系统，当磁盘根常卡在 systemd 阶段；卡了就 `deepin_src_url` 覆盖成板级 `.img.xz`（如 rock5），脚本自动识别 ISO/tar/img.xz/zip。
+- **源**：默认用 **官方 community arm64 ISO**（飞腾/鲲鹏取向）。可用 `deepin_src_url` 覆盖成其它镜像（脚本自动识别 ISO/tar/img.xz/zip）。
 - **无 initramfs**：本方案复用的 `boot_sheng_*.img` **不带 ramdisk**，依赖内核内置
   UFS/ext4。
 - **DDE 会话**：脚本 best-effort 配了 lightdm 自动登录；若 Deepin 25 用的不是
