@@ -71,8 +71,8 @@ Windows 解压 `.gz`（任选其一，解出 `deepin.img`）：
 :: Win10 1803+ 自带 tar
 tar -xf deepin.img.gz
 
-:: 或装 7-Zip
-7z x deepin.img.gz
+:: Git Bash / WSL
+gzip -d deepin.img.gz
 ```
 
 解出来就是 Android sparse rootfs `.img`（magic `3aff26ed`），刷机直接用。
