@@ -72,6 +72,7 @@ system_files/                       # 注入到镜像的设备服务/规则脚�
 | **要做单次解压**（GitHub zip + 7z 双层） | 直接输出 sparse `.img`，Release 走 `.img.gz` 分卷 |
 | **屏幕键盘难用** | dconf 系统默认：onboard 停靠底部 + Droid 主题 + 自动弹出 |
 | **卸载应用时输密码的弹窗不能拖动**（X11 下 `dde-polkit-agent` 给 AuthDialog 设了 `Qt::BypassWindowManagerHint` → override-redirect，绕过窗口管理器 → 系统拖窗失效） | `tools/dde-polkit-movable/interposer.c`：编一个**只剥掉这一个 flag** 的 `LD_PRELOAD` 拦截器 → `system_files/etc/systemd/user/dde-polkit-agent.service.d/zz-movable.conf` 注入，构建时装到 `/usr/local/lib/dde-sheng-movable/libpolkitmove.so`。弹窗变回 WM 管理的可拖动窗口（不影响 Popup/ToolTip） |
+| **电量一直显示“充电中”**（实际在用电池） | dde-daemon 的 `OnBattery` 只认 `type=="mains"` 的 power_supply（`dde-api/powersupply.IsMains`），sheng 内核只暴露 `USB`/`Wireless` 线供（qcom-battmgr-usb/wls、ucsi-source-psy）→ 找不到 mains → `OnBattery` 恒 `false` → DDE 显示充电。`tools/dde-power-ac/interposer.c`：`LD_PRELOAD` 把 `qcom-battmgr-usb` 报成 `mains`、其 `online` 取真实电池充电态 → `system_files/etc/systemd/system/dde-system-daemon.service.d/zz-power-ac.conf` 注入，构建装到 `/usr/local/lib/dde-sheng-power/` |
 | DNS/下载/挂载各种小坑 | chroot DNS、保留 URL 扩展名 + magic 嗅探、`mkdir` 挂载点、选最大 ext4、去掉 `--info=progress2` |
 
 ## 硬件支持现状

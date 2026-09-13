@@ -390,6 +390,26 @@ EOF
         rm -f "$ROOTDIR/etc/systemd/user/dde-polkit-agent.service.d/zz-movable.conf"
         rmdir "$ROOTDIR/etc/systemd/user/dde-polkit-agent.service.d" 2>/dev/null || true
     fi
+    # 5e. dde-daemon (power1) always shows the battery as "charging": its
+    #     OnBattery is set only from a power_supply of type "mains", which the
+    #     sheng kernel never exposes (only USB/Wireless line-power), so the field
+    #     keeps its Go zero value (false). Compile a small LD_PRELOAD interposer
+    #     that presents the USB port as a Mains supply (type=mains) and reports
+    #     its online state from the real battery status, so DDE reflects the
+    #     battery correctly. The systemd drop-in is shipped via system_files.
+    echo "==> Installing dde-daemon 'mains AC' interposer..."
+    _ac_src="$SCRIPT_DIR/tools/dde-power-ac/interposer.c"
+    if [ -f "$_ac_src" ] && command -v gcc >/dev/null 2>&1; then
+        install -d "$ROOTDIR/usr/local/lib/dde-sheng-power"
+        gcc -shared -fPIC -O2 -fno-stack-protector \
+            -o "$ROOTDIR/usr/local/lib/dde-sheng-power/libdde-power-ac.so" \
+            "$_ac_src" -ldl
+        echo "    /usr/local/lib/dde-sheng-power/libdde-power-ac.so"
+    else
+        echo "    WARN: gcc or interposer.c missing; power-ac fix skipped" >&2
+        rm -f "$ROOTDIR/etc/systemd/system/dde-system-daemon.service.d/zz-power-ac.conf"
+        rmdir "$ROOTDIR/etc/systemd/system/dde-system-daemon.service.d" 2>/dev/null || true
+    fi
     # WirePlumber on Deepin defaults to ACP instead of UCM, so this card exposes
     # no UCM profile (only "off"/"pro-audio") -> PipeWire falls back to a Dummy
     # output. Flip it to the UCM path so the real ALSA sinks appear.
