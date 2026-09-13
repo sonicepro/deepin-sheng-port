@@ -369,6 +369,27 @@ EOF
         # compile the dconf system defaults (on-screen keyboard config, etc.)
         chroot "$ROOTDIR" dconf update 2>/dev/null || true
     fi
+    # 5d. Polkit password dialog: make it movable. On X11 dde-polkit-agent's
+    #     AuthDialog sets Qt::BypassWindowManagerHint (=> override-redirect), so
+    #     the dialog bypasses the window manager and the user cannot drag it.
+    #     Compile a tiny LD_PRELOAD interposer that strips that single flag, so
+    #     the dialog becomes a normal WM-managed (draggable) window. The systemd
+    #     user drop-in that wires the preload in is shipped via system_files.
+    echo "==> Installing polkit password-dialog 'movable' interposer..."
+    _mov_src="$SCRIPT_DIR/tools/dde-polkit-movable/interposer.c"
+    if [ -f "$_mov_src" ] && command -v gcc >/dev/null 2>&1; then
+        install -d "$ROOTDIR/usr/local/lib/dde-sheng-movable"
+        gcc -shared -fPIC -O2 -fno-stack-protector \
+            -o "$ROOTDIR/usr/local/lib/dde-sheng-movable/libpolkitmove.so" \
+            "$_mov_src" -ldl
+        echo "    /usr/local/lib/dde-sheng-movable/libpolkitmove.so"
+    else
+        echo "    WARN: gcc or interposer.c missing; dialog-movable fix skipped" >&2
+        # Drop the dangling LD_PRELOAD drop-in so the agent isn't told to
+        # preload a .so that was never built.
+        rm -f "$ROOTDIR/etc/systemd/user/dde-polkit-agent.service.d/zz-movable.conf"
+        rmdir "$ROOTDIR/etc/systemd/user/dde-polkit-agent.service.d" 2>/dev/null || true
+    fi
     # WirePlumber on Deepin defaults to ACP instead of UCM, so this card exposes
     # no UCM profile (only "off"/"pro-audio") -> PipeWire falls back to a Dummy
     # output. Flip it to the UCM path so the real ALSA sinks appear.
