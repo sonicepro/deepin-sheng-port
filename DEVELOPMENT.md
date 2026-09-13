@@ -65,7 +65,7 @@ system_files/                       # 注入到镜像的设备服务/规则脚�
 | **登录页 UI 特别小**（不跟随桌面缩放 250%） | greeter 的 DConfig 里没有缩放项 → fallback 100%；`system_files` 改成**读用户 `~/.config/deepin/qt-theme.ini` 的 `ScreenScaleFactors`**（构建 `chmod 711 /home/<user>` 让登录器读得到） |
 | **登出提示音特别大**（不跟随用户音量） | 提示音由 `sound-theme-player` **直接走 ALSA**、绕过 PipeWire 音量；`dde-session` 又不看 `enable-event-sounds` → 构建把 `desktop-logout.wav`/`desktop-login.wav` **换成静音 wav**（`system_files/usr/share/sounds/deepin/stereo/`） |
 | **文件管理器“计算机”里一堆小磁盘** | `system_files/etc/udev/rules.d/70-hide-small-partitions.rules`：给 sda1–27 / `sd[b-z]` 等 **<1 GiB** 分区设 `UDISKS_IGNORE=1` → udisks2（及文件管理器）不再列出 |
-| **DDE 系统更新下载不了** | ISO 带 `/etc/deepin-immutable-ctl` → `lastore-daemon` 当成 ostree 不可变系统、跑 ostree 远程更新失败（无 `/sysroot/ostree/repo`）；构建**删掉它** → lastore 走普通 apt |
+| **DDE 系统更新下载不了**（暂缓） | DDE「系统更新」的**下载步骤只会走** `deepin-immutable-ctl upgrade --download-only`（ostree 不可变系统专用），本机是摊平 ext4、无 `/sysroot/ostree/repo`、无 ostree 远端 → 必然失败；删 ctl 二进制只会把它变成 `fork/exec … no such file`。**保留** ISO 的 `/etc/deepin-immutable-ctl` 与 `/usr/sbin/deepin-immutable-ctl`（与官方一致）；要真正可用需把端口改造成 ostree 部署，待后续 |
 | **120W 快充不生效** | 装 `xiaomi-mipps-auth`（内核 `pmic-glink` 节点已在） |
 | **待机秒醒 / 屏幕自动亮**（插充电时尤甚） | sheng（SM8550）的 `deep` 挂起会在几秒内自唤醒（充电时几乎必现）→ `system_files` 加 `sheng-mem-sleep.service`：开机把默认睡眠态钉成 **`s2idle`**，`deep` 不再启用 |
 | **刷完分区没撑满** | fstab 加 `x-systemd.growfs`（首启自动扩容） |

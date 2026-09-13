@@ -419,22 +419,18 @@ EOF
     fi
     chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y openssh-server" >/dev/null 2>&1 || true
     # Mask units that can't work here (would otherwise show as [FAILED]):
-    #  * deepin-face              — no face-auth hardware on sheng
-    #  * deepin-immutable-cleanup — the ISO root is an ostree/immutable
-    #                               deployment; ours is a plain ext4, so it fails
+    #  * deepin-face — no face-auth hardware on sheng
+    # (deepin-immutable-cleanup.service/.timer are left as shipped, matching
+    #  official deepin.)
     mkdir -p "$ROOTDIR/etc/systemd/system"
-    for _u in deepin-face.service deepin-immutable-cleanup.service deepin-immutable-cleanup.timer; do
-        ln -sf /dev/null "$ROOTDIR/etc/systemd/system/$_u"
-    done
-    # This is a plain ext4 root, not a Deepin "immutable" (ostree) deployment, but
-    # the ISO ships /etc/deepin-immutable-ctl which makes lastore-daemon treat the
-    # system as immutable and run ostree update steps that fail (no
-    # /sysroot/ostree/repo) -> the DDE updater can't download. Remove it so
-    # lastore uses the normal apt path.
-    rm -rf "$ROOTDIR/etc/deepin-immutable-ctl"
-    # lastore also invokes "deepin-immutable-ctl upgrade" (ostree) when the ctl
-    # binary is present; drop it so the updater uses the plain apt download path.
-    rm -f "$ROOTDIR/usr/sbin/deepin-immutable-ctl"
+    ln -sf /dev/null "$ROOTDIR/etc/systemd/system/deepin-face.service"
+    # Keep the ISO's immutable-update files (/etc/deepin-immutable-ctl and
+    # /usr/sbin/deepin-immutable-ctl) so the rootfs matches official deepin.
+    # Deleting them does NOT fix the DDE updater: lastore's system-update
+    # download unconditionally runs "deepin-immutable-ctl upgrade --download-only",
+    # which needs a real ostree deployment (/sysroot/ostree/repo + a remote) we
+    # don't have. Making DDE "system update" download is deferred for now (it
+    # needs the port to be a genuine ostree deployment).
     # PipeWire-Pulse reads /etc/pulse/default.pa; its `module-always-sink` spawns
     # a fallback null sink when the card isn't ready yet, which then sticks as
     # the default output -> no sound. Drop it so the real card is the default.
