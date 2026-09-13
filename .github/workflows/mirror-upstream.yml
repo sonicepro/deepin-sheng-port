@@ -1,0 +1,97 @@
+# .github/workflows/mirror-upstream.yml
+# Mirror the upstream sheng driver bundle into *this* repo, so the build
+# workflows never depend on the (moved / wiped) upstream release repos again.
+# Run once per upstream kernel version, before Build Deepin 25 / bootimg.
+#
+#   kernel bundle : code002-2/sheng-linux-build  @ kernel-bundle-<ver>
+#   firmware      : alghiffaryfa19/sheng-firmware (master tarball)
+#   MIPPS auth    : ianchb/xiaomi-mipps-auth      @ latest tag
+#
+# Output: a release tagged `kernel-bundle-<ver>` in this repo holding exactly
+# what the build consumes:
+#   - every .deb from the upstream kernel bundle (kernel, firmware, alsa,
+#     fastrpc, iio-sensor-proxy, libssc, sheng-devauth, sheng-sensors)
+#   - sheng-firmware-master.tar.gz  (full firmware overlay)
+#   - xiaomi-mipps-auth.deb         (120W charger auth, fixed name)
+name: Mirror upstream sheng assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: '内核版本（对应上游 kernel-bundle-<ver>）'
+        required: true
+        default: '7.1'
+      upstream_kernel_repo:
+        description: '上游内核包仓库'
+        required: true
+        default: 'code002-2/sheng-linux-build'
+      firmware_url:
+        description: '固件 tarball 来源 URL'
+        required: true
+        default: 'https://codeload.github.com/alghiffaryfa19/sheng-firmware/tar.gz/refs/heads/master'
+      mipps_repo:
+        description: 'MIPPS 快充认证仓库（取最新 tag 的 deb）'
+        required: true
+        default: 'ianchb/xiaomi-mipps-auth'
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Download kernel bundle .deb assets
+        env:
+          KVER: ${{ inputs.kernel_version }}
+          UPSTREAM: ${{ inputs.upstream_kernel_repo }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p vendor
+          rel="${RUNNER_TEMP:-/tmp}/rel.json"
+          curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/kernel-bundle-${KVER}" -o "$rel"
+          cd vendor
+          jq -r '.assets[].browser_download_url' "$rel" | grep -E '\.deb$' \
+            | while read -r u; do echo "  + $(basename "$u")"; curl -fsSL -O "$u"; done
+          echo "==> kernel bundle debs:"; ls -la
+
+      - name: Download firmware tarball
+        env:
+          FW_URL: ${{ inputs.firmware_url }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o vendor/sheng-firmware-master.tar.gz "$FW_URL"
+          echo "==> firmware:"; ls -la vendor/
+
+      - name: Download MIPPS auth deb (latest upstream tag, fixed name)
+        env:
+          MIPPS_REPO: ${{ inputs.mipps_repo }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${MIPPS_REPO}/releases/latest" | jq -r '.tag_name')
+          [ -n "$tag" ] && [ "$tag" != "null" ] || { echo "ERROR: no release in ${MIPPS_REPO}"; exit 1; }
+          echo "==> MIPPS tag: ${tag}"
+          curl -fsSL -o vendor/xiaomi-mipps-auth.deb \
+            "https://github.com/${MIPPS_REPO}/releases/download/${tag}/xiaomi-mipps-auth_${tag}_arm64.deb"
+          echo "==> MIPPS:"; ls -la vendor/
+
+      - name: Publish mirror release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kernel-bundle-${{ inputs.kernel_version }}
+          name: "sheng 驱动包镜像 v${{ inputs.kernel_version }}"
+          body: |
+            Mirror of the sheng driver bundle for Xiaomi Pad 6S Pro (sheng), so
+            the build workflows are self-contained.
+
+            | 资产 | 上游来源 |
+            |------|----------|
+            | 内核/固件/驱动 `.deb` | `${{ inputs.upstream_kernel_repo }}` @ `kernel-bundle-${{ inputs.kernel_version }}` |
+            | 固件 tarball | `${{ inputs.firmware_url }}` |
+            | MIPPS 快充认证 deb | `${{ inputs.mipps_repo }}` (latest) |
+          files: vendor/*

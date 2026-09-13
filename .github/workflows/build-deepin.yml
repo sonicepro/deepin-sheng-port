@@ -72,13 +72,13 @@ jobs:
           CHANNEL: ${{ inputs.kernel_channel }}
         run: |
           set -euo pipefail
-          REPO=code002-2/Xiaomi-pad-6s-pro-Linux
+          REPO="${{ github.repository }}"
           got=0
           for TAG in "kernel-bundle-${CHANNEL}-${KVER}" "kernel-bundle-${KVER}" kernel-bundle-latest; do
             echo "==> trying release tag: ${TAG}"
             if curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" -o rel.json; then
               if jq -e '.assets | length > 0' rel.json >/dev/null 2>&1; then
-                jq -r '.assets[].browser_download_url' rel.json | while read -r u; do
+                jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url' rel.json | while read -r u; do
                   echo "   download $(basename "$u")"
                   curl -fsSL -O "$u"
                 done
@@ -93,6 +93,8 @@ jobs:
       - name: Build Deepin rootfs
         env:
           DEEPIN_SRC_URL: ${{ inputs.deepin_src_url }}
+          FIRMWARE_URL: https://github.com/${{ github.repository }}/releases/download/kernel-bundle-${{ inputs.kernel_version }}/sheng-firmware-master.tar.gz
+          MIPPS_DEB_URL: https://github.com/${{ github.repository }}/releases/download/kernel-bundle-${{ inputs.kernel_version }}/xiaomi-mipps-auth.deb
         run: |
           set -euo pipefail
           sudo -E bash sheng-deepin-rootfs_build.sh \

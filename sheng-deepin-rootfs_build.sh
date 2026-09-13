@@ -315,7 +315,7 @@ EOF
     done
     fwdir="$(mktemp -d)"
     wget -nv -O "$fwdir/fw.tar.gz" \
-        "${FIRMWARE_URL:-https://codeload.github.com/alghiffaryfa19/sheng-firmware/tar.gz/refs/heads/master}"
+        "${FIRMWARE_URL:-https://github.com/sonicepro/deepin-sheng-port/releases/download/kernel-bundle-7.1/sheng-firmware-master.tar.gz}"
     tar -xzf "$fwdir/fw.tar.gz" -C "$fwdir"
     fwsrc="$(find "$fwdir" -maxdepth 1 -mindepth 1 -type d -name 'sheng-firmware-*' | head -1)"
     [ -n "$fwsrc" ] && cp -a "$fwsrc"/. "$ROOTDIR/lib/firmware/"
@@ -328,7 +328,7 @@ EOF
     # (otherwise it stays at the standard PPS/PD rate).
     echo "==> Installing Xiaomi MIPPS auth (120W charging)..."
     _mipps="$(mktemp -d)/mipps.deb"
-    if wget -nv -O "$_mipps" "${MIPPS_DEB_URL:-https://github.com/code002-2/Xiaomi-pad-6s-pro-Linux/releases/download/mipps/xiaomi-mipps-auth_0.11_arm64.deb}"; then
+    if wget -nv -O "$_mipps" "${MIPPS_DEB_URL:-https://github.com/sonicepro/deepin-sheng-port/releases/download/kernel-bundle-7.1/xiaomi-mipps-auth.deb}"; then
         dpkg-deb --fsys-tarfile "$_mipps" | tar -x --keep-directory-symlink -C "$ROOTDIR/"
         echo "    installed /usr/libexec/xiaomi-mipps-auth (+ service + udev rule)"
     else
