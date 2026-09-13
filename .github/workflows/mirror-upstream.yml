@@ -42,6 +42,9 @@ jobs:
   mirror:
     runs-on: ubuntu-24.04-arm
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download kernel bundle .deb assets
         env:
           KVER: ${{ inputs.kernel_version }}
@@ -84,6 +87,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: kernel-bundle-${{ inputs.kernel_version }}
+          target_commitish: ${{ github.sha }}
           name: "sheng 驱动包镜像 v${{ inputs.kernel_version }}"
           body: |
             Mirror of the sheng driver bundle for Xiaomi Pad 6S Pro (sheng), so
