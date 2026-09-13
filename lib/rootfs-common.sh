@@ -265,7 +265,7 @@ preflight_checks() {
     fi
 
     # 通用必要工具（所有发行版都需要）
-    local tools="truncate mkfs.ext4 img2simg 7z dpkg-deb tune2fs fuser"
+    local tools="truncate mkfs.ext4 img2simg dpkg-deb tune2fs fuser"
     # 追加发行版特定的工具检查
     for tool in "$@"; do
         tools="$tools $tool"

@@ -393,10 +393,6 @@ if old in s:
 PY
         fi
 
-        # The 3-finger-swipe daemon reads the touchscreen (/dev/input/event*)
-        # directly, so the desktop user needs access to the input devices.
-        chroot "$ROOTDIR" usermod -aG input luser 2>/dev/null || true
-
         # dconf-cli is required for `dconf update` to compile local.d -> local.
         # The base image ships only the dconf runtime, so without this the system
         # defaults (onboard skin / layout / handles) are silently skipped and the
@@ -507,14 +503,12 @@ PY
     # (worst while charging, where DDE "待机" blanks the screen only to light up
     # again). Pin s2idle, which sleeps correctly.
     chroot "$ROOTDIR" systemctl enable sheng-mem-sleep.service 2>/dev/null || true
-    # USB gadget network (self-skips on units with no UDC).
-    chroot "$ROOTDIR" systemctl enable usb-gadget-net.service 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable ssh 2>/dev/null || chroot "$ROOTDIR" systemctl enable sshd 2>/dev/null || true
     # Bluetooth HID (mice/keyboards) goes through uhid (BLE) / hidp (BR-EDR);
     # both are modules and auto-loaded by nothing, so after pairing a mouse can't
     # connect. Load them at boot.
     printf 'uhid\nhidp\n' > "$ROOTDIR/etc/modules-load.d/sheng-bluetooth-hid.conf"
-    printf '\nDeepin (sheng)： ssh %s@<平板IP>  (走 WiFi；或 USB 网络 192.168.42.15)\n\n' "$USER_NAME" \
+    printf '\nDeepin (sheng)： ssh %s@<平板IP>  (走 WiFi)\n\n' "$USER_NAME" \
         > "$ROOTDIR/etc/issue"
 
     # 6. Users + hostname + locale

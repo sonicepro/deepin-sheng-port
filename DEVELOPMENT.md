@@ -57,7 +57,6 @@ system_files/                       # 注入到镜像的设备服务/规则脚�
 | **WiFi（ath12k WCN7850）** 起不来 | `fix_wifi_firmware`：`board-2.bin` → `board.bin` 伪装 |
 | **`qrtr-ns.service` 失败** | 装 `qrtr` 包 + `ConditionPathExists` 兜底（没有就跳过） |
 | **`getty@ttyMSM0` 失败** | 去掉（内核命令行 `con_enabled=0`，该串口不存在） |
-| **`usb-gadget-net` 失败**（`203/EXEC`） | `ExecStart=/bin/bash …` + 无 UDC 时 `ConditionPathExistsGlob` 跳过 |
 | **没声音**（WirePlumber 走 ACP 不走 UCM → Dummy 输出） | 打补丁 `use-acp=false` + `sheng-audio-rebind`（ADSP 竞态后重探）+ `sheng-audio-ucm`（应用 UCM + 开 6 个 cs35l43 功放） |
 | **重启后没声音**（WirePlumber 早于声卡启动 → 只出 `null-sink`、默认输出指向它） | 注释 `module-always-sink` + 登录自启 `sheng-default-sink`：真实 sink 缺失时**自动重启 PipeWire** 并钉住默认输出 |
 | **蓝牙鼠标连不上**（配对成功，但没输入设备、光标不动） | `uhid`/`hidp`（蓝牙 HID 传输）是内核模块且无人自动加载 → `/etc/modules-load.d/` **开机加载** |
@@ -137,11 +136,3 @@ system_files/                       # 注入到镜像的设备服务/规则脚�
   systemctl --failed
   journalctl -xb
   ```
-
-### USB 网络（有线兜底）
-
-接 USB 线后会出现一个新网卡（Remote NDIS…），**设备 IP 固定 `192.168.42.15`**：
-
-- Windows：把该网卡设成 `192.168.42.1/24`
-  `netsh interface ip set address "以太网 <n>" static 192.168.42.1 255.255.255.0`
-- 然后：`ssh luser@192.168.42.15`（密码 `luser`）。
