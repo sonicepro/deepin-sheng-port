@@ -2,11 +2,13 @@
 # Docks it full-width at the bottom, Blackboard skin + Small layout, auto-shows on
 # text focus. This is a SYSTEM dconf default (system-db:local), so the login
 # greeter (running as the lightdm user) picks up the same skin as the desktop.
-# window-handles='M' keeps only the move handle -> a stray two-finger drag can no
-# longer resize the keyboard. Resizing is done on demand from the Enter long-press
-# popup (the build patches the Small layout: that popup's "hide keyboard" button
-# becomes a "move/resize" button). Requires dconf-cli so `dconf update` compiles
-# this into /etc/dconf/db/local (see the build script).
+# window-handles='' removes the drag handles entirely -> a stray multi-finger drag
+# can no longer resize the keyboard (onboard shows its resize grips on a
+# multi-finger drag whenever the MOVE handle is present). On-demand resizing is done
+# from the Enter long-press popup: the build patches the Small layout (that popup's
+# "hide keyboard" button becomes a "move/resize" button) and patches onboard's
+# BCMove.update so that button stays visible without the MOVE handle. Requires
+# dconf-cli so `dconf update` compiles this into /etc/dconf/db/local (see docs).
 [org/onboard]
 theme='Blackboard'
 layout='Small'
@@ -16,7 +18,7 @@ use-system-defaults=false
 docking-enabled=true
 docking-edge='bottom'
 force-to-top=true
-window-handles='M'
+window-handles=''
 
 [org/onboard/auto-show]
 enabled=true

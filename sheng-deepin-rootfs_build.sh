@@ -372,8 +372,8 @@ EOF
         #     backspace becomes a Hide/close key at the very same spot.
         #   * Enter long-press popup: its "hide keyboard" button becomes a
         #     "move/resize" button (onboard's `move` key) so the keyboard size can
-        #     still be changed on demand (passive two-finger resize is disabled via
-        #     window-handles='M' in the dconf default shipped above).
+        #     still be changed on demand (passive multi-finger resize is disabled
+        #     via window-handles='' in the dconf default shipped above).
         _kb="$ROOTDIR/usr/share/onboard/layouts/Small.onboard"
         if [ -f "$_kb" ]; then
             sed -i 's|<key group="bottomrow" id="DELE"/>|<key group="bottomrow" id="hide" svg_id="DELE"/>|g' "$_kb"
@@ -388,6 +388,30 @@ old = ('      <key id="settings"/>\n'
 new = ('      <key id="settings"/>\n'
        '      <key id="showclick"/>\n'
        '      <key id="move" svg_id="hide.popup"/>')
+if old in s:
+    open(p, "w").write(s.replace(old, new, 1))
+PY
+        fi
+
+        # Onboard: make the Enter-popup's "move/resize" button visible without the
+        # MOVE drag handle, so a stray multi-finger drag can't resize the keyboard
+        # (window-handles='') yet the popup button still resizes on demand.
+        _obk="$ROOTDIR/usr/lib/python3/dist-packages/Onboard/Keyboard.py"
+        if [ -f "$_obk" ]; then
+            python3 - "$_obk" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = ("    def update(self):\n"
+       "        self.set_visible(not config.has_window_decoration() and\n"
+       "                         not config.xid_mode and\n"
+       "                         Handle.MOVE in config.window.window_handles)\n")
+new = ("    def update(self):\n"
+       "        # sheng: keep the move/resize button visible regardless of the\n"
+       "        # MOVE handle (a stray multi-finger drag must not resize the\n"
+       "        # keyboard, yet the popup button still resizes on demand).\n"
+       "        self.set_visible(not config.has_window_decoration() and\n"
+       "                         not config.xid_mode)\n")
 if old in s:
     open(p, "w").write(s.replace(old, new, 1))
 PY

@@ -69,9 +69,9 @@ system_files/                       # 注入到镜像的设备服务/规则脚�
 | **待机秒醒 / 屏幕自动亮**（插充电时尤甚） | sheng（SM8550）的 `deep` 挂起会在几秒内自唤醒（充电时几乎必现）→ `system_files` 加 `sheng-mem-sleep.service`：开机把默认睡眠态钉成 **`s2idle`**，`deep` 不再启用 |
 | **刷完分区没撑满** | fstab 加 `x-systemd.growfs`（首启自动扩容） |
 | **要做单次解压**（GitHub zip + 7z 双层） | 直接输出 sparse `.img`，Release 走 `.img.gz` 分卷 |
-| **屏幕键盘难用** | dconf 系统默认（`system_files/etc/dconf/db/local.d/00-sheng-onboard`）：onboard 停靠底部 + **Blackboard 皮肤 / Small 布局** + 自动弹出；`window-handles='M'` 防误触改大小。**需 `dconf-cli`**（构建里装），否则 `dconf update` 静默失败、系统默认不生效 |
+| **屏幕键盘难用** | dconf 系统默认（`system_files/etc/dconf/db/local.d/00-sheng-onboard`）：onboard 停靠底部 + **Blackboard 皮肤 / Small 布局** + 自动弹出；`window-handles=''` 防多指滑动误改大小。**需 `dconf-cli`**（构建里装），否则 `dconf update` 静默失败、系统默认不生效 |
 | **屏幕键盘没有关闭键**（且有个没用的“清除/删除”键） | 构建给 `Small.onboard` 打补丁：行末的 `id="DELE"` 键（图标 `erase.svg`，方框带 ×）**就地**改成 onboard 内建 Hide（`id="hide" svg_id="DELE"` → `close.svg`，点一下收起键盘）；真·Delete 保留在 Fn 层的文字 “Del” 键上 |
-| **屏幕键盘想手动改大小** | `window-handles='M'` 关掉了拖拽改大小/误触；构建把 `Small.onboard` 回车长按弹窗 `RTRN_popup` 的“关闭键盘”键换成 onboard 的 **move** 键（`id="move" svg_id="hide.popup"`）→ 长按回车可呼出调整手柄改大小 |
+| **屏幕键盘想手动改大小** | `window-handles=''` 关掉所有拖拽手柄（含 `M`）→ **多指拖动不再引出 resize 抓手**、不会误改大小（onboard 只要 `window-handles` 含 `M`，一次多指拖动就会 `on_drag_gesture_begin` → `show_touch_handles()` 引出抓手）。改大小改由回车长按弹窗的 **move** 键触发：构建把 `Small.onboard` 的 `RTRN_popup`“关闭键盘”键换成 `move`（`id="move" svg_id="hide.popup"`），**并给 onboard 的 `BCMove.update` 打补丁去掉对 `M` 手柄的依赖** → 该键在 `window-handles=''` 下仍可见/可用，点它呼出抓手改大小 |
 | **登录页键盘皮肤和桌面不一致** | greeter 以 `lightdm` 用户运行，只读**系统 dconf 默认**（`system-db:local`），看不到用户 dconf。系统默认写了 `theme='Blackboard'`、`layout='Small'`（与桌面一致）→ 登录页统一。前提：`dconf-cli` + `dconf update` |
 | **屏幕键盘变成白色皮肤**（官方没有，自己调的） | 当前主题是 `Blackboard`，其配色方案 `Charcoal` 被改成白色（底 `#ffffff`、字 `#1a1a1a`）；`Granite`/`White` 配色与 `White.theme` 也一并改成白。这几个文件随构建覆盖镜像：`system_files/usr/share/onboard/themes/{Charcoal,Granite,White}.colors` + `White.theme` |
 | **三指上滑呼出键盘** | `system_files/usr/local/sbin/sheng-gesture-keyboard.py`（读触摸屏 MT-B 事件识别三指上滑，调 onboard D-Bus `org.onboard.Onboard.Keyboard.Show()`）+ `system_files/etc/systemd/system/sheng-gesture-keyboard.service`（`User=luser`）。构建把 `luser` 加进 `input` 组并 `systemctl enable` 该服务 |
