@@ -311,31 +311,6 @@ teardown_mounts() {
 }
 
 # ---------------------------------------------------------------------------
-# pack_sparse_image  — 转换为 sparse 镜像并用 7z 极速压缩
-#   参数: <image_path> <output_7z_path>
-# ---------------------------------------------------------------------------
-pack_sparse_image() {
-    local image_path="$1" output_7z="$2"
-
-    if [ ! -f "$image_path" ]; then
-        echo "错误: 镜像文件 '$image_path' 不存在" >&2
-        return 1
-    fi
-
-    local sparse_img="sparse_${image_path}"
-    if ! img2simg "$image_path" "$sparse_img"; then
-        echo "错误: img2simg 转换失败" >&2
-        return 1
-    fi
-    if ! 7z a -mx=1 "$output_7z" "$sparse_img"; then
-        echo "错误: 7z 压缩失败" >&2
-        rm -f "$sparse_img"
-        return 1
-    fi
-    rm -f "$image_path" "$sparse_img"
-}
-
-# ---------------------------------------------------------------------------
 # apply_fs_uuid  — 设置文件系统 UUID
 #   参数: <uuid> <image_path>
 # ---------------------------------------------------------------------------

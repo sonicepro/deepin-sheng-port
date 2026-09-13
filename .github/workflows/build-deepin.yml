@@ -63,7 +63,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            p7zip-full curl wget jq rsync xz-utils zstd unzip \
+            curl wget jq rsync xz-utils zstd unzip \
             squashfs-tools util-linux android-sdk-libsparse-utils
 
       - name: Download sheng kernel .deb (from upstream releases)
