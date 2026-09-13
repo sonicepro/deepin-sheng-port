@@ -7,4 +7,7 @@ mkbootimg text eol=lf
 *.network text eol=lf
 *.yml  text eol=lf
 *.yaml text eol=lf
+*.py     text eol=lf
+*.colors text eol=lf
+*.theme  text eol=lf
 *      text=auto

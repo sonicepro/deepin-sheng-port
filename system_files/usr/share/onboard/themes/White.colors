@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<color_scheme name="White" format="2.1">
+<window type="key-popup"><color element="border" rgb="#cccccc"/></window>
+<layer><color element="background" rgb="#ffffff"/></layer>
+<key_group>
+<color element="fill" rgb="#ffffff"/>
+<color element="fill" rgb="#e2e2e2" prelight="true"/>
+<color element="fill" rgb="#d0d0d0" pressed="true"/>
+<color element="fill" rgb="#d8d8d8" active="true"/>
+<color element="fill" rgb="#d8d8d8" locked="true"/>
+<color element="stroke" rgb="#e6e6e6"/>
+<color element="label" rgb="#1a1a1a"/>
+</key_group>
+</color_scheme>

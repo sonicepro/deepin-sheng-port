@@ -1,18 +1,29 @@
 # sheng defaults: make the on-screen keyboard (onboard) touch-friendly.
-# Docks it full-width at the bottom, clean theme, auto-shows on text focus.
+# Docks it full-width at the bottom, Blackboard skin + Small layout, auto-shows on
+# text focus. This is a SYSTEM dconf default (system-db:local), so the login
+# greeter (running as the lightdm user) picks up the same skin as the desktop.
+# window-handles='M' keeps only the move handle -> a stray two-finger drag can no
+# longer resize the keyboard. Resizing is done on demand from the Enter long-press
+# popup (the build patches the Small layout: that popup's "hide keyboard" button
+# becomes a "move/resize" button). Requires dconf-cli so `dconf update` compiles
+# this into /etc/dconf/db/local (see the build script).
 [org/onboard]
-theme='Droid'
-layout='Compact'
+theme='Blackboard'
+layout='Small'
 use-system-defaults=false
 
 [org/onboard/window]
 docking-enabled=true
 docking-edge='bottom'
 force-to-top=true
+window-handles='M'
 
 [org/onboard/auto-show]
 enabled=true
 hide-on-key-press=true
+
+[org/onboard/lockdown]
+disable-touch-handles=false
 
 [org/onboard/keyboard]
 touch-input='multi'

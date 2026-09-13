@@ -366,9 +366,48 @@ EOF
         cp -a "$SCRIPT_DIR/system_files/." "$ROOTDIR/"
         # git may not preserve the exec bit -> make the helper scripts runnable
         chmod 0755 "$ROOTDIR"/usr/local/sbin/*.sh 2>/dev/null || true
+
+        # On-screen keyboard (onboard) layout tweaks for the tablet:
+        #   * Close button: the unused "clear/delete" key (icon erase.svg) next to
+        #     backspace becomes a Hide/close key at the very same spot.
+        #   * Enter long-press popup: its "hide keyboard" button becomes a
+        #     "move/resize" button (onboard's `move` key) so the keyboard size can
+        #     still be changed on demand (passive two-finger resize is disabled via
+        #     window-handles='M' in the dconf default shipped above).
+        _kb="$ROOTDIR/usr/share/onboard/layouts/Small.onboard"
+        if [ -f "$_kb" ]; then
+            sed -i 's|<key group="bottomrow" id="DELE"/>|<key group="bottomrow" id="hide" svg_id="DELE"/>|g' "$_kb"
+            python3 - "$_kb" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = ('      <key id="settings"/>\n'
+       '      <key id="move"/>\n'
+       '      <key id="showclick"/>\n'
+       '      <key group="nowordlist" id="hide" image="close.svg" svg_id="hide.popup"/>')
+new = ('      <key id="settings"/>\n'
+       '      <key id="showclick"/>\n'
+       '      <key id="move" svg_id="hide.popup"/>')
+if old in s:
+    open(p, "w").write(s.replace(old, new, 1))
+PY
+        fi
+
+        # The 3-finger-swipe daemon reads the touchscreen (/dev/input/event*)
+        # directly, so the desktop user needs access to the input devices.
+        chroot "$ROOTDIR" usermod -aG input luser 2>/dev/null || true
+
+        # dconf-cli is required for `dconf update` to compile local.d -> local.
+        # The base image ships only the dconf runtime, so without this the system
+        # defaults (onboard skin / layout / handles) are silently skipped and the
+        # login greeter keeps its own default keyboard skin.
+        chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y dconf-cli" >/dev/null 2>&1 || true
+
         # compile the dconf system defaults (on-screen keyboard config, etc.)
         chroot "$ROOTDIR" dconf update 2>/dev/null || true
     fi
+    # 3-finger swipe up -> on-screen keyboard (system service, runs as the user)
+    chroot "$ROOTDIR" systemctl enable sheng-gesture-keyboard.service 2>/dev/null || true
     # 5d. Polkit password dialog: make it movable. On X11 dde-polkit-agent's
     #     AuthDialog sets Qt::BypassWindowManagerHint (=> override-redirect), so
     #     the dialog bypasses the window manager and the user cannot drag it.
