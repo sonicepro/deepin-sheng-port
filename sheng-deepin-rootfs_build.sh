@@ -366,6 +366,10 @@ EOF
         cp -a "$SCRIPT_DIR/system_files/." "$ROOTDIR/"
         # git may not preserve the exec bit -> make the helper scripts runnable
         chmod 0755 "$ROOTDIR"/usr/local/sbin/*.sh 2>/dev/null || true
+        # The lightdm greeter wrapper is exec'd by the greeter session, so it must
+        # be +x -- but it has no .sh suffix, so the glob above misses it. Without
+        # +x the greeter session fails and the login page never shows.
+        chmod 0755 "$ROOTDIR/etc/deepin/greeters.d/lightdm-deepin-greeter" 2>/dev/null || true
 
         # On-screen keyboard (onboard) layout tweaks for the tablet:
         #   * Close button: the unused "clear/delete" key (icon erase.svg) next to
@@ -417,14 +421,17 @@ if old in s:
 PY
         fi
 
-        # dconf-cli is required for `dconf update` to compile local.d -> local.
-        # The base image ships only the dconf runtime, so without this the system
-        # defaults (onboard skin / layout / handles) are silently skipped and the
-        # login greeter keeps its own default keyboard skin.
-        chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y dconf-cli" >/dev/null 2>&1 || true
+        # dconf-cli is required for `dconf update` to compile local.d -> local;
+        # at-spi2-core provides the accessibility bus onboard needs at startup
+        # (without it onboard exits immediately, taking the login-page/desktop
+        # keyboard with it). Both otherwise fail silently on a bad apt run.
+        chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y dconf-cli at-spi2-core" >/dev/null 2>&1 || true
 
         # compile the dconf system defaults (on-screen keyboard config, etc.)
         chroot "$ROOTDIR" dconf update 2>/dev/null || true
+        if [ ! -e "$ROOTDIR/etc/dconf/db/local" ]; then
+            echo "WARN: /etc/dconf/db/local did not compile (dconf-cli install or 'dconf update' failed) -> onboard system defaults will NOT apply" >&2
+        fi
     fi
     # 3-finger swipe up -> on-screen keyboard (system service, runs as the user)
     chroot "$ROOTDIR" systemctl enable sheng-gesture-keyboard.service 2>/dev/null || true

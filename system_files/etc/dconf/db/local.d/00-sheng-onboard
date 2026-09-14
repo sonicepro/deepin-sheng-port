@@ -12,7 +12,7 @@
 [org/onboard]
 theme='Blackboard'
 layout='Small'
-use-system-defaults=false
+use-system-defaults=true
 
 [org/onboard/window]
 docking-enabled=true

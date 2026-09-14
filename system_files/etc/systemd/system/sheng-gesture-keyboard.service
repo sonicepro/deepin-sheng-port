@@ -1,6 +1,10 @@
 [Unit]
 Description=3-finger swipe up -> show on-screen keyboard (onboard)
-After=graphical.target
+# NB: deliberately no "After=graphical.target". Combined with
+# "WantedBy=multi-user.target" it forms an ordering cycle (graphical.target is
+# ordered after multi-user.target), so systemd deleted the start job and the
+# service never ran at all. The script tolerates starting early -- it just waits
+# for the touchscreen and only calls onboard's D-Bus on a gesture.
 
 [Service]
 # Runs as the desktop user; reads the touchscreen directly and calls onboard's
