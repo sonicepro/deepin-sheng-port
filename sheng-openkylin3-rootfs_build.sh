@@ -268,11 +268,6 @@ for MODE in "${BOOTMODES[@]}"; do
     echo "==> Copying userland into ${ROOTFS_IMG}..."
     rsync -aHAX --numeric-ids "$STAGE/" "$ROOTDIR/"
 
-    # 2b. Normalize ownership of the top level (some live roots are owned by a
-    #     non-root uid), so systemd-tmpfiles etc. don't refuse to run.
-    chown 0:0 "$ROOTDIR"
-    find "$ROOTDIR" -xdev -uid 1001 ! -path "$ROOTDIR/home/*" -exec chown 0:0 {} + 2>/dev/null || true
-
     MODES_LEFT=$((MODES_LEFT - 1))
     [ "$MODES_LEFT" -eq 0 ] && rm -rf "$STAGE"
 
@@ -287,10 +282,10 @@ for MODE in "${BOOTMODES[@]}"; do
     echo "==> Injecting sheng kernel .deb..."
     inject_deb_kernel "$ROOTDIR" "./*.deb"
 
-    # 4b. Firmware. Two problems as on Deepin: the shipped firmware-xiaomi-sheng
-    #     .deb lands blobs under /usr/lib/<driver>/ (the kernel only searches
-    #     /lib/firmware/), and it omits the Adreno GPU firmware (qcom/a740_sqe.fw
-    #     + qcom/gmu_gen70200.bin). Copy the deb's blobs into /lib/firmware/ then
+    # 4b. Firmware: two problems with the firmware-xiaomi-sheng .deb — it lands
+    #     blobs under /usr/lib/<driver>/ (the kernel only searches /lib/firmware/)
+    #     and it omits the Adreno GPU firmware (qcom/a740_sqe.fw +
+    #     qcom/gmu_gen70200.bin). Copy the deb's blobs into /lib/firmware/ then
     #     overlay the full source-repo firmware set.
     echo "==> Installing sheng firmware into /lib/firmware/..."
     mkdir -p "$ROOTDIR/lib/firmware"
