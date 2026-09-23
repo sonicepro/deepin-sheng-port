@@ -44,11 +44,11 @@ OPENKYLIN_COMPONENTS="${OPENKYLIN_COMPONENTS:-main,cross,pty}"
 OPENKYLIN_KEYRING_URL="${OPENKYLIN_KEYRING_URL:-${OPENKYLIN_MIRROR}project/openkylin-archive-keyring.gpg}"
 OPENKYLIN_KEYRING_PATH="${OPENKYLIN_KEYRING_PATH:-/usr/share/keyrings/openkylin-archive-keyring.gpg}"
 
-# Desktop meta package. openKylin's desktop is UKUI; the exact meta name varies by
-# release (candidates: ukui, ukui-desktop-environment, kylin-desktop,
-# openkylin-desktop). Installed BEST-EFFORT — a miss warns, it does not fail the
-# build, so a bare (still bootable) base is always produced. Override via env.
-OPENKYLIN_DESKTOP_META="${OPENKYLIN_DESKTOP_META:-ukui}"
+# Desktop meta package. openKylin's desktop is UKUI; the real meta package is
+# 'ukui-desktop-environment' (confirmed present in the huanghe/nile indexes).
+# For the touch/tablet UI there is also 'ukui-tablet-desktop'. Installed
+# BEST-EFFORT — a miss warns, it does not fail the build. Override via env.
+OPENKYLIN_DESKTOP_META="${OPENKYLIN_DESKTOP_META:-ukui-desktop-environment}"
 
 ROOT_PASS="${ROOT_PASS:-1234}"
 USER_PASS="${USER_PASS:-luser}"
@@ -231,8 +231,20 @@ deb ${OPENKYLIN_MIRROR} ${OPENKYLIN_SUITE} main cross pty
 deb ${OPENKYLIN_MIRROR} ${OPENKYLIN_SUITE}-updates main cross pty
 deb ${OPENKYLIN_MIRROR} ${OPENKYLIN_SUITE}-security main cross pty
 EOF
+    # 3b. Make the target's apt trust openKylin. debootstrap verified the archive
+    #     with our host keyring but does not install that keyring into the target,
+    #     so the chroot's apt would fail NO_PUBKEY. Drop the keyring where apt
+    #     reads it.
+    mkdir -p "$ROOTDIR/etc/apt/trusted.gpg.d"
+    install -m644 "$OPENKYLIN_KEYRING_PATH" \
+        "$ROOTDIR/etc/apt/trusted.gpg.d/openkylin-archive-keyring.gpg" 2>/dev/null || true
     echo "==> apt-get update (populate package lists)..."
-    chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update" >/dev/null 2>&1 || true
+    _aptupd="$(mktemp)"
+    if ! chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update" >"$_aptupd" 2>&1; then
+        echo "WARN: apt-get update reported errors; tail:" >&2
+        tail -n 15 "$_aptupd" >&2 || true
+    fi
+    rm -f "$_aptupd"
 
     # 3c. Grow the minimal base with the chroot's own apt. openKylin's repo
     #     carries BOTH the pre-t64 and t64 variants of several core libs

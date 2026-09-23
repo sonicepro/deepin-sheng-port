@@ -45,7 +45,7 @@ on:
       openkylin_desktop_meta:
         description: '桌面元包（best-effort；留空=只出基础系统）'
         required: false
-        default: 'ukui'
+        default: 'ukui-desktop-environment'
       openkylin_mirror:
         description: 'openKylin 归档镜像（留空=官方 archive.build.openkylin.top）'
         required: false

@@ -48,7 +48,7 @@ system_files_openkylin/             # openKylin 用的通用设备配置（NM/ud
    符号链接到通用 Ubuntu 脚本 `gutsy`）从 `http://archive.build.openkylin.top/openkylin/`
    拉取，组件 `main cross pty`，用归档导出的 `openkylin-archive-keyring.gpg` 校验
 2. **写 apt 源** — `<suite>` / `<suite>-updates` / `<suite>-security`
-3. **桌面元包** — `OPENKYLIN_DESKTOP_META`（默认 `ukui`）**best-effort** 安装
+3. **桌面元包** — `OPENKYLIN_DESKTOP_META`（默认 `ukui-desktop-environment`；平板 UI 可用 `ukui-tablet-desktop`）**best-effort** 安装
 4. **注入** sheng 内核 `.deb` + 固件 + MIPPS；**通用设备修复**（qrtr、触摸校准、WiFi 固件、蓝牙 HID 开机加载、NM 去随机 MAC）
 5. **用户 / 主机名 / locale / 时区 / lightdm 自动登录 / fstab**
 6. Android sparse → gzip（与 Deepin 产物同构）
