@@ -285,9 +285,16 @@ EOF
         fi
     fi
 
-    # Diagnostic: how big is the rootfs and how many packages landed? If the
-    # chroot apt couldn't reach the network this stays tiny (~283MB image).
-    echo "==> Rootfs after core+desktop: $(du -sm "$ROOTDIR" | cut -f1) MiB, $(chroot "$ROOTDIR" bash -c 'dpkg -l 2>/dev/null | grep -c "^ii"' || echo 0) packages"
+    # Diagnostic + hard-fail. If the chroot apt install didn't land, the rootfs
+    # stays tiny (~283MB) and the image is useless. Abort rather than silently
+    # ship a broken image, so the failing step's apt output is what gets looked at.
+    _rootmb=$(du -sm "$ROOTDIR" | cut -f1)
+    _npkg=$(chroot "$ROOTDIR" bash -c 'dpkg -l 2>/dev/null | grep -c "^ii"' || echo 0)
+    echo "==> Rootfs after core+desktop: ${_rootmb} MiB, ${_npkg} packages"
+    if [ -n "$OPENKYLIN_DESKTOP_META" ] && [ "${_rootmb:-0}" -lt 800 ]; then
+        echo "ERROR: rootfs is only ${_rootmb} MiB after installing core+desktop -- the chroot apt install did not land (see the apt output above). Aborting." >&2
+        exit 1
+    fi
 
     # 4b. Optional device helper packages (best-effort; names vary by suite).
     chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y qrtr" >/dev/null 2>&1 || true
