@@ -35,6 +35,7 @@ workflow **Build openKylin Desktop**。
 - 触发：Actions → **Build openKylin Desktop** → Run workflow（默认 `nile` 2.0 + `dual` 启动模式）。
 - 桌面元包默认 `ukui-desktop-environment-core`（完整元包 `ukui-desktop-environment` 因缺 `libeis1` 当前装不上；平板 UI 可换 `ukui-tablet-desktop`），**best-effort**：
   名字对不上只告警、不中断，仍会产出可引导的基础系统（可用 workflow 输入 / `OPENKYLIN_DESKTOP_META` 覆盖）。
+- **openKylin 3.0（huanghe）**：其实时 apt 仓库不完整（桌面依赖缺包 `libeis1` / `user-session-migration` / `python3-watchdog`）→ 改用 `sheng-openkylin3-rootfs_build.sh` + workflow **Build openKylin 3 from image**，**从官方 arm64 镜像提取 rootfs**（仿 Deepin 的做法），运行需填 `openkylin_img_url`（镜像直链）。
 - 设备级修复只带**通用**部分（WiFi 固定 MAC、蓝牙 HID 模块、隐藏小分区、MIPPS 120W）；
   Deepin/DDE 专属（linglong、onboard、polkit 可拖动、电源 AC、提示音）**不适用**、未移植。
 
