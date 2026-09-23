@@ -44,11 +44,13 @@ OPENKYLIN_COMPONENTS="${OPENKYLIN_COMPONENTS:-main,cross,pty}"
 OPENKYLIN_KEYRING_URL="${OPENKYLIN_KEYRING_URL:-${OPENKYLIN_MIRROR}project/openkylin-archive-keyring.gpg}"
 OPENKYLIN_KEYRING_PATH="${OPENKYLIN_KEYRING_PATH:-/usr/share/keyrings/openkylin-archive-keyring.gpg}"
 
-# Desktop meta package. openKylin's desktop is UKUI; the real meta package is
-# 'ukui-desktop-environment' (confirmed present in the huanghe/nile indexes).
-# For the touch/tablet UI there is also 'ukui-tablet-desktop'. Installed
-# BEST-EFFORT — a miss warns, it does not fail the build. Override via env.
-OPENKYLIN_DESKTOP_META="${OPENKYLIN_DESKTOP_META:-ukui-desktop-environment}"
+# Desktop meta package. openKylin's desktop is UKUI. Use the -core meta:
+# 'ukui-desktop-environment' (the full meta) is currently UNINSTALLABLE because
+# it pulls kylin-screenshot -> kylin-wayland-compositor -> libeis1, and libeis1
+# is missing from openKylin's arm64 archive. 'ukui-desktop-environment-core'
+# gives the core UKUI desktop (panel/control-center/session/menu/peony/...) and
+# installs fine. Tablet UI: 'ukui-tablet-desktop'. BEST-EFFORT. Override via env.
+OPENKYLIN_DESKTOP_META="${OPENKYLIN_DESKTOP_META:-ukui-desktop-environment-core}"
 
 ROOT_PASS="${ROOT_PASS:-1234}"
 USER_PASS="${USER_PASS:-luser}"
@@ -284,6 +286,12 @@ EOF
             echo "WARN: desktop meta '${OPENKYLIN_DESKTOP_META}' did not install; base image only" >&2
         fi
     fi
+
+    # Login screen: the UKUI desktop meta does not pull a display manager, so
+    # install lightdm + the UKUI greeter (the autologin config further down assumes
+    # lightdm). Best-effort.
+    chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y lightdm ukui-greeter" \
+        || echo "WARN: lightdm/ukui-greeter install failed; no graphical login" >&2
 
     # Diagnostic + hard-fail. If the chroot apt install didn't land, the rootfs
     # stays tiny (~283MB) and the image is useless. Abort rather than silently

@@ -33,7 +33,7 @@ workflow **Build openKylin Desktop**。
 
 - 产物：`openkylin_<版本>_<模式>_<时间>.img.gz`，刷机/合并方式与 Deepin 产物完全一致。
 - 触发：Actions → **Build openKylin Desktop** → Run workflow（默认 `huanghe` 3.0 + `dual` 启动模式）。
-- 桌面元包默认 `ukui-desktop-environment`（平板 UI 可换成 `ukui-tablet-desktop`），**best-effort** 安装：
+- 桌面元包默认 `ukui-desktop-environment-core`（完整元包 `ukui-desktop-environment` 因缺 `libeis1` 当前装不上；平板 UI 可换 `ukui-tablet-desktop`），**best-effort**：
   名字对不上只告警、不中断，仍会产出可引导的基础系统（可用 workflow 输入 / `OPENKYLIN_DESKTOP_META` 覆盖）。
 - 设备级修复只带**通用**部分（WiFi 固定 MAC、蓝牙 HID 模块、隐藏小分区、MIPPS 120W）；
   Deepin/DDE 专属（linglong、onboard、polkit 可拖动、电源 AC、提示音）**不适用**、未移植。
