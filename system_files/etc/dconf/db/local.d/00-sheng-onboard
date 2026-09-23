@@ -1,24 +1,51 @@
-# sheng defaults: make the on-screen keyboard (onboard) touch-friendly.
-# Docks it full-width at the bottom, Blackboard skin + Small layout, auto-shows on
-# text focus. This is a SYSTEM dconf default (system-db:local), so the login
-# greeter (running as the lightdm user) picks up the same skin as the desktop.
+# sheng defaults: on-screen keyboard (onboard) SYSTEM defaults, mirroring the
+# calibrated settings of the reference device (`dconf dump /org/onboard/`).
+# Docked full-width at the bottom, Blackboard skin (its Charcoal color scheme is
+# overridden to white in system_files/usr/share/onboard/themes/Charcoal.colors),
+# Small layout, auto-shows on text focus.
+#
+# This is a SYSTEM dconf default (system-db:local), so BOTH the login greeter
+# (running as the lightdm user) and the desktop session pick it up -- provided
+# the build compiles it into /etc/dconf/db/local. That requires dconf-cli and a
+# `dconf update` at build time; without it this file is silently inert (gsettings
+# keeps reporting "unable to open /etc/dconf/db/local") and onboard falls back to
+# its built-in defaults. See DEVELOPMENT.md.
+#
 # window-handles='' removes the drag handles entirely -> a stray multi-finger drag
-# can no longer resize the keyboard (onboard shows its resize grips on a
-# multi-finger drag whenever the MOVE handle is present). On-demand resizing is done
-# from the Enter long-press popup: the build patches the Small layout (that popup's
-# "hide keyboard" button becomes a "move/resize" button) and patches onboard's
-# BCMove.update so that button stays visible without the MOVE handle. Requires
-# dconf-cli so `dconf update` compiles this into /etc/dconf/db/local (see docs).
+# can no longer resize the keyboard (onboard shows its resize grips on any
+# multi-finger drag while the MOVE handle is present). On-demand resizing is done
+# from the Enter long-press popup: the build patches the Small layout (its "hide
+# keyboard" button becomes a "move/resize" button) and patches onboard's
+# BCMove.update so that button stays visible without the MOVE handle.
+
 [org/onboard]
 theme='Blackboard'
 layout='Small'
-use-system-defaults=true
+
+# Appearance: Blackboard's own defaults, kept explicit (matches the tuned device).
+[org/onboard/theme-settings]
+color-scheme='Charcoal'
+key-style='gradient'
+key-fill-gradient=8.0
+key-stroke-gradient=0.0
+key-gradient-direction=-3.0
+key-size=92.0
+roundrect-radius=30.0
 
 [org/onboard/window]
 docking-enabled=true
 docking-edge='bottom'
+docking-monitor='active'
 force-to-top=true
 window-handles=''
+
+# Docked keyboard geometry (landscape), as calibrated on the tablet.
+[org/onboard/window/landscape]
+width=1531
+height=368
+x=1
+y=646
+dock-height=331
 
 [org/onboard/auto-show]
 enabled=true
@@ -30,3 +57,8 @@ disable-touch-handles=false
 [org/onboard/keyboard]
 touch-input='multi'
 audio-feedback-enabled=false
+
+# Let GTK/Qt apps request the on-screen keyboard (needed alongside the AT-SPI
+# typelib for auto-show to fire).
+[org/gnome/desktop/a11y/applications]
+screen-keyboard-enabled=true

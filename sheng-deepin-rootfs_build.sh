@@ -421,17 +421,45 @@ if old in s:
 PY
         fi
 
-        # dconf-cli is required for `dconf update` to compile local.d -> local;
-        # at-spi2-core provides the accessibility bus onboard needs at startup
-        # (without it onboard exits immediately, taking the login-page/desktop
-        # keyboard with it). Both otherwise fail silently on a bad apt run.
-        chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y dconf-cli at-spi2-core" >/dev/null 2>&1 || true
+        # Onboard's system defaults (system_files/etc/dconf/db/local.d/00-sheng-onboard)
+        # only take effect once compiled into /etc/dconf/db/local by `dconf update`.
+        # That needs the `dconf` binary (package dconf-cli); auto-show additionally
+        # needs the AT-SPI GObject-introspection typelib (gir1.2-atspi-2.0) and the
+        # a11y bus (at-spi2-core). None of the three ship in the ISO.
+        #
+        # Do NOT depend on the chroot's apt here: on the CI runner every
+        # `chroot … apt-get install` silently fails (nothing ever lands -- that is
+        # exactly why earlier images had no dconf-cli, no /etc/dconf/db/local and an
+        # inert onboard default). wget on the runner DOES work, so fetch the .deb-s
+        # and unpack them straight into the root filesystem -- the same injection
+        # pattern already used for the kernel, firmware and MIPPS above.
+        _inject_deb() {   # _inject_deb <url> <label>
+            local _url="$1" _label="$2" _dir _deb
+            _dir="$(mktemp -d)"; _deb="${_dir}/pkg.deb"
+            if wget -nv -O "$_deb" "$_url"; then
+                dpkg-deb --fsys-tarfile "$_deb" | tar -x --keep-directory-symlink -C "$ROOTDIR/"
+                echo "    injected ${_label}"
+            else
+                echo "ERROR: failed to fetch ${_label}: ${_url}" >&2
+                rm -rf "$_dir"; return 1
+            fi
+            rm -rf "$_dir"
+        }
+        # Pinned Deepin arm64 pool versions; override via env if they move.
+        _pool="https://community-packages.deepin.com/beige/pool"
+        _inject_deb "${DCONF_CLI_DEB_URL:-${_pool}/main/d/dconf/dconf-cli_0.40.0-2_arm64.deb}"                      "dconf-cli"
+        _inject_deb "${AT_SPI2_CORE_DEB_URL:-${_pool}/main/a/at-spi2-core/at-spi2-core_2.59.1-2deepin1_arm64.deb}"    "at-spi2-core"
+        _inject_deb "${AT_SPI2_GIR_DEB_URL:-${_pool}/main/a/at-spi2-core/gir1.2-atspi-2.0_2.59.1-2deepin1_arm64.deb}" "gir1.2-atspi-2.0"
 
-        # compile the dconf system defaults (on-screen keyboard config, etc.)
-        chroot "$ROOTDIR" dconf update 2>/dev/null || true
-        if [ ! -e "$ROOTDIR/etc/dconf/db/local" ]; then
-            echo "WARN: /etc/dconf/db/local did not compile (dconf-cli install or 'dconf update' failed) -> onboard system defaults will NOT apply" >&2
-        fi
+        # Fail loudly if the pieces didn't land, then compile the system db.
+        [ -x "$ROOTDIR/usr/bin/dconf" ] \
+            || { echo "ERROR: dconf missing after injection -> onboard defaults cannot compile" >&2; exit 1; }
+        chroot "$ROOTDIR" python3 -c 'import gi; gi.require_version("Atspi","2.0"); from gi.repository import Atspi' \
+            || { echo "ERROR: AT-SPI typelib missing -> auto-show would be unavailable" >&2; exit 1; }
+        chroot "$ROOTDIR" dconf update
+        [ -e "$ROOTDIR/etc/dconf/db/local" ] \
+            || { echo "ERROR: /etc/dconf/db/local not generated -> onboard system defaults would NOT apply" >&2; exit 1; }
+        echo "    compiled /etc/dconf/db/local (onboard system defaults)"
     fi
     # 3-finger swipe up -> on-screen keyboard (system service, runs as the user)
     chroot "$ROOTDIR" systemctl enable sheng-gesture-keyboard.service 2>/dev/null || true
