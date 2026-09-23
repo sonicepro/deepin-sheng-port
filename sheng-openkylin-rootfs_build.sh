@@ -57,9 +57,11 @@ SYSTEM_HOSTNAME="${SYSTEM_HOSTNAME:-sheng}"
 SYSTEM_LOCALE="${SYSTEM_LOCALE:-zh_CN.UTF-8}"
 SYSTEM_TIMEZONE="${SYSTEM_TIMEZONE:-Asia/Shanghai}"
 
-# Packages that MUST install for the image to be usable; the bootstrap fails
-# loudly if any is unavailable (all are standard in Debian/Ubuntu-derived bases).
-CORE_PACKAGES="apt,ca-certificates,systemd,systemd-sysv,sudo,openssh-server,network-manager,iproute2,kmod,udev,dbus,locales,e2fsprogs,util-linux,bash"
+# Core packages for a usable system. Installed via the *chroot's own apt* AFTER
+# the minimal bootstrap (openKylin's apt resolves the pre-t64 vs t64 transition
+# correctly; debootstrap's resolver does not -- see bootstrap_openkylin).
+# Kept comma-separated; converted to spaces where used.
+CORE_PACKAGES="ca-certificates,systemd,systemd-sysv,sudo,openssh-server,network-manager,iproute2,kmod,udev,dbus,locales,e2fsprogs,util-linux,bash"
 
 # --- Args --------------------------------------------------------------------
 validate_args 2 4 $# '<distro-variant> <kernel_version> [boot_mode] [desktop_env]'
@@ -130,7 +132,7 @@ bootstrap_openkylin() {
         if EXTRACTOR_OVERRIDE=ar debootstrap --arch=arm64 --variant=minbase \
               --components="$OPENKYLIN_COMPONENTS" \
               "${keyargs[@]}" \
-              --include="$CORE_PACKAGES" \
+              --include=apt \
               "$OPENKYLIN_SUITE" "$dest" "$OPENKYLIN_MIRROR" \
               && [ -x "$dest/usr/bin/apt-get" ]; then
             echo "    base userland ready (debootstrap)"
@@ -152,7 +154,7 @@ bootstrap_openkylin() {
           --variant=minbase \
           --components="$OPENKYLIN_COMPONENTS" \
           "${keyargs[@]}" \
-          --include="$CORE_PACKAGES" \
+          --include=apt \
           --mode=root \
           "$OPENKYLIN_SUITE" "$dest" "$OPENKYLIN_MIRROR" \
           && [ -x "$dest/usr/bin/apt-get" ]; then
@@ -231,6 +233,24 @@ deb ${OPENKYLIN_MIRROR} ${OPENKYLIN_SUITE}-security main cross pty
 EOF
     echo "==> apt-get update (populate package lists)..."
     chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update" >/dev/null 2>&1 || true
+
+    # 3c. Grow the minimal base with the chroot's own apt. openKylin's repo
+    #     carries BOTH the pre-t64 and t64 variants of several core libs
+    #     (libssl3 + libssl3t64, libgnutls30 + libgnutls30t64, ...); debootstrap's
+    #     resolver has no Breaks/Replaces handling so it installs both and they
+    #     fail to configure. apt does handle the transition, so the base is
+    #     bootstrapped bare and grown here. policy-rc.d keeps services from
+    #     being started inside the chroot during postinst.
+    printf '#!/bin/sh\nexit 101\n' > "$ROOTDIR/usr/sbin/policy-rc.d"
+    chmod 0755 "$ROOTDIR/usr/sbin/policy-rc.d"
+    echo "==> Installing core packages via chroot apt..."
+    if chroot "$ROOTDIR" bash -c \
+         "export DEBIAN_FRONTEND=noninteractive; apt-get install -y --no-install-recommends ${CORE_PACKAGES//,/ }"; then
+        echo "    core packages installed"
+    else
+        echo "WARN: some core packages failed to install; continuing" >&2
+    fi
+    rm -f "$ROOTDIR/usr/sbin/policy-rc.d"
 
     # 4. Desktop meta (best-effort). A wrong/renamed meta must not sink the
     #    build: the base stays bootable and reachable over SSH.
