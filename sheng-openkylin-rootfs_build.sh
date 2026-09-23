@@ -35,10 +35,13 @@ source "${SCRIPT_DIR}/lib/rootfs-common.sh"
 IMAGE_SIZE="${IMAGE_SIZE:-}"
 UUID="${UUID:-ee8d3593-59b1-480e-a3b6-4fefb17ee7d8}"   # repo default
 
-# openKylin release. Default 3.0 "huanghe" (latest release). Other suites:
-#   nile (2.0) / nile.bedrock (2.0 SP2) / yangtze (1.0)
-OPENKYLIN_VERSION="${OPENKYLIN_VERSION:-3.0}"
-OPENKYLIN_SUITE="${OPENKYLIN_SUITE:-huanghe}"
+# openKylin release. Default 2.0 "nile": its repo is self-consistent (has all
+# deps). 3.0 "huanghe" is currently BROKEN -- several of its packages depend on
+# packages absent from the archive (libeis1, user-session-migration,
+# python3-watchdog), so the UKUI desktop cannot be installed from it. Other
+# suites: huanghe (3.0) / nile.bedrock (2.0 SP2) / yangtze (1.0).
+OPENKYLIN_VERSION="${OPENKYLIN_VERSION:-2.0}"
+OPENKYLIN_SUITE="${OPENKYLIN_SUITE:-nile}"
 OPENKYLIN_MIRROR="${OPENKYLIN_MIRROR:-http://archive.build.openkylin.top/openkylin/}"
 OPENKYLIN_COMPONENTS="${OPENKYLIN_COMPONENTS:-main,cross,pty}"
 OPENKYLIN_KEYRING_URL="${OPENKYLIN_KEYRING_URL:-${OPENKYLIN_MIRROR}project/openkylin-archive-keyring.gpg}"
