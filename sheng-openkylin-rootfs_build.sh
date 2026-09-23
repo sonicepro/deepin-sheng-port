@@ -82,14 +82,14 @@ TIMESTAMP=$(generate_timestamp)
 
 # --- Extraction/bootstrap tools (runner may not ship these; idempotent) -------
 _missing=0
-for _t in mmdebstrap debootstrap wget rsync xz zstd losetup; do
+for _t in mmdebstrap debootstrap wget rsync xz zstd ar losetup; do
     command -v "$_t" >/dev/null 2>&1 || _missing=1
 done
 if [ "$_missing" -eq 1 ]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y --no-install-recommends \
-        mmdebstrap debootstrap wget rsync xz-utils zstd util-linux
+        mmdebstrap debootstrap wget rsync xz-utils zstd binutils util-linux
 fi
 
 # --- openKylin archive keyring ----------------------------------------------
@@ -105,55 +105,63 @@ download_openkylin_keyring() {
 }
 
 # --- Bootstrap the openKylin base userland into <dest> -----------------------
-# Tries mmdebstrap first (suite-agnostic), falls back to debootstrap (needs a
-# suite script; openKylin is Ubuntu-derived so 'gutsy' — debootstrap's generic
-# Ubuntu script — is symlinked in for the suite name).
+# openKylin 3.0 "huanghe" ships zstd-compressed .deb payloads (data.tar.zst);
+# 2.0 "nile" still ships xz. A host dpkg-deb that can't decode zstd makes BOTH
+# the default debootstrap `dpkg-deb` extractor AND mmdebstrap fail (mmdebstrap:
+# "chroot: ... dpkg: No such file or directory" after an empty extraction;
+# debootstrap: "Tried to extract package, but tar failed"). So we drive
+# debootstrap with the raw `ar` extractor (EXTRACTOR_OVERRIDE=ar), which shells
+# out to `zstdcat`/`xzcat` -- the `zstd`/`xz-utils` CLI we install -- so the
+# payload compression is handled by the CLI regardless of the host dpkg.
+#
+# openKylin is Ubuntu-derived and split-usr, so debootstrap's generic Ubuntu
+# script ('gutsy') is symlinked in for the suite name.
 bootstrap_openkylin() {
     local dest="$1"
     mkdir -p "$dest"
     local keyargs=()
     [ -s "$OPENKYLIN_KEYRING_PATH" ] && keyargs=(--keyring="$OPENKYLIN_KEYRING_PATH")
 
-    local ok=0
-    if command -v mmdebstrap >/dev/null 2>&1; then
-        echo "==> Bootstrap (mmdebstrap ${OPENKYLIN_SUITE} -> ${dest})"
-        if mmdebstrap \
-              --architectures=arm64 \
-              --variant=minbase \
+    # 1) debootstrap with the `ar` extractor (handles both xz and zstd payloads).
+    if command -v debootstrap >/dev/null 2>&1; then
+        local sdir="/usr/share/debootstrap/scripts"
+        [ -e "$sdir/$OPENKYLIN_SUITE" ] || ln -sf gutsy "$sdir/$OPENKYLIN_SUITE"
+        echo "==> Bootstrap (debootstrap extractor=ar ${OPENKYLIN_SUITE} -> ${dest})"
+        if EXTRACTOR_OVERRIDE=ar debootstrap --arch=arm64 --variant=minbase \
               --components="$OPENKYLIN_COMPONENTS" \
               "${keyargs[@]}" \
               --include="$CORE_PACKAGES" \
-              --mode=root \
-              "$OPENKYLIN_SUITE" "$dest" "$OPENKYLIN_MIRROR"; then
-            ok=1
-        else
-            echo "WARN: mmdebstrap failed; falling back to debootstrap" >&2
+              "$OPENKYLIN_SUITE" "$dest" "$OPENKYLIN_MIRROR" \
+              && [ -x "$dest/usr/bin/apt-get" ]; then
+            echo "    base userland ready (debootstrap)"
+            return 0
         fi
+        echo "WARN: debootstrap failed; tail of debootstrap.log:" >&2
+        if [ -f "$dest/debootstrap/debootstrap.log" ]; then
+            tail -n 30 "$dest/debootstrap/debootstrap.log" >&2 || true
+        fi
+        rm -rf "$dest"; mkdir -p "$dest"
     fi
 
-    # Sanity: a usable base needs apt-get + dpkg. If mmdebstrap produced a husk
-    # (e.g. it didn't recognise the suite), retry with debootstrap.
-    if [ "$ok" -eq 1 ] && [ ! -x "$dest/usr/bin/apt-get" ]; then
-        echo "WARN: mmdebstrap produced a base without apt-get; retrying with debootstrap" >&2
-        ok=0
+    # 2) mmdebstrap fallback (native apt install; cleanest for xz-only suites).
+    command -v mmdebstrap >/dev/null 2>&1 \
+        || { echo "ERROR: neither a working debootstrap nor mmdebstrap is available" >&2; return 1; }
+    echo "==> Bootstrap (mmdebstrap ${OPENKYLIN_SUITE} -> ${dest})"
+    if mmdebstrap \
+          --architectures=arm64 \
+          --variant=minbase \
+          --components="$OPENKYLIN_COMPONENTS" \
+          "${keyargs[@]}" \
+          --include="$CORE_PACKAGES" \
+          --mode=root \
+          "$OPENKYLIN_SUITE" "$dest" "$OPENKYLIN_MIRROR" \
+          && [ -x "$dest/usr/bin/apt-get" ]; then
+        echo "    base userland ready (mmdebstrap)"
+        return 0
     fi
 
-    if [ "$ok" -eq 0 ]; then
-        command -v debootstrap >/dev/null 2>&1 \
-            || { echo "ERROR: neither a working mmdebstrap nor debootstrap is available" >&2; return 1; }
-        local sdir="/usr/share/debootstrap/scripts"
-        [ -e "$sdir/$OPENKYLIN_SUITE" ] || ln -sf gutsy "$sdir/$OPENKYLIN_SUITE"
-        echo "==> Bootstrap (debootstrap ${OPENKYLIN_SUITE} -> ${dest})"
-        debootstrap --arch=arm64 --variant=minbase \
-            --components="$OPENKYLIN_COMPONENTS" \
-            "${keyargs[@]}" \
-            --include="$CORE_PACKAGES" \
-            "$OPENKYLIN_SUITE" "$dest" "$OPENKYLIN_MIRROR"
-    fi
-
-    [ -x "$dest/usr/bin/apt-get" ] \
-        || { echo "ERROR: bootstrap failed: no /usr/bin/apt-get in the target" >&2; return 1; }
-    echo "    base userland ready"
+    echo "ERROR: bootstrap failed: no usable /usr/bin/apt-get in the target" >&2
+    return 1
 }
 
 # --- openKylin / lightdm autologin (UKUI uses lightdm) -----------------------
