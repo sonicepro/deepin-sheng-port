@@ -35,7 +35,7 @@ on:
       openkylin_img_url:
         description: 'openKylin 3.0 arm64 镜像直链（ISO / .img.xz / .tar.* / .zip，必填）'
         required: true
-        default: ''
+        default: 'https://cdimage.openkylin.top/3.0/openKylin-Desktop-V3.0-20260905-arm64.iso'
       openkylin_version:
         description: '版本号（仅用于产物命名）'
         required: false
@@ -62,7 +62,8 @@ jobs:
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup /usr/share/swift /usr/local/share/powershell || true
           sudo apt-get clean
           df -h / || true
 
