@@ -32,7 +32,7 @@ workflow **Build openKylin Desktop**。
 **不需要**取现成镜像。
 
 - 产物：`openkylin_<版本>_<模式>_<时间>.img.gz`，刷机/合并方式与 Deepin 产物完全一致。
-- 触发：Actions → **Build openKylin Desktop** → Run workflow（`openkylin_suite` 默认 `nile`）。
+- 触发：Actions → **Build openKylin Desktop** → Run workflow（默认 `huanghe` 3.0 + `dual` 启动模式）。
 - 桌面元包默认 `ukui`，**best-effort** 安装：名字对不上只告警、不中断，仍会产出可引导的
   基础系统（可用 workflow 输入 / `OPENKYLIN_DESKTOP_META` 覆盖）。
 - 设备级修复只带**通用**部分（WiFi 固定 MAC、蓝牙 HID 模块、隐藏小分区、MIPPS 120W）；

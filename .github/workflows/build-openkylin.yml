@@ -31,17 +31,17 @@ on:
         required: true
         type: choice
         options: [single, dual, all]
-        default: 'single'
+        default: 'dual'
       openkylin_suite:
         description: 'openKylin 套件代号'
         required: true
         type: choice
         options: [nile, huanghe, nile.bedrock, yangtze]
-        default: 'nile'
+        default: 'huanghe'
       openkylin_version:
         description: 'openKylin 版本号（仅用于产物命名）'
         required: false
-        default: '2.0'
+        default: '3.0'
       openkylin_desktop_meta:
         description: '桌面元包（best-effort；留空=只出基础系统）'
         required: false

@@ -18,7 +18,7 @@
 # Driven by .github/workflows/build-openkylin.yml (runs-on: ubuntu-24.04-arm).
 #
 # Usage:
-#   sudo bash sheng-openkylin-rootfs_build.sh openkylin-desktop 7.1 single ukui
+#   sudo bash sheng-openkylin-rootfs_build.sh openkylin-desktop 7.1 dual ukui
 #     args: <distro-variant> <kernel_version> [boot_mode: single|dual|all] [desktop_env]
 #           desktop_env = 桌面元包名（默认 ukui）；传 none/- 只出无桌面的基础系统
 #
@@ -35,10 +35,10 @@ source "${SCRIPT_DIR}/lib/rootfs-common.sh"
 IMAGE_SIZE="${IMAGE_SIZE:-}"
 UUID="${UUID:-ee8d3593-59b1-480e-a3b6-4fefb17ee7d8}"   # repo default
 
-# openKylin release. Default 2.0 "nile" (most documented). Other suites:
-#   huanghe (3.0) / nile.bedrock (2.0 SP2) / yangtze (1.0)
-OPENKYLIN_VERSION="${OPENKYLIN_VERSION:-2.0}"
-OPENKYLIN_SUITE="${OPENKYLIN_SUITE:-nile}"
+# openKylin release. Default 3.0 "huanghe" (latest release). Other suites:
+#   nile (2.0) / nile.bedrock (2.0 SP2) / yangtze (1.0)
+OPENKYLIN_VERSION="${OPENKYLIN_VERSION:-3.0}"
+OPENKYLIN_SUITE="${OPENKYLIN_SUITE:-huanghe}"
 OPENKYLIN_MIRROR="${OPENKYLIN_MIRROR:-http://archive.build.openkylin.top/openkylin/}"
 OPENKYLIN_COMPONENTS="${OPENKYLIN_COMPONENTS:-main,cross,pty}"
 OPENKYLIN_KEYRING_URL="${OPENKYLIN_KEYRING_URL:-${OPENKYLIN_MIRROR}project/openkylin-archive-keyring.gpg}"
@@ -69,7 +69,7 @@ validate_root
 
 DISTRO=$1
 KERNEL=$2
-TARGET_MODE=${3:-single}
+TARGET_MODE=${3:-dual}
 TARGET_FLAVOUR=${4:-}       # 4th arg selects the desktop meta (see below)
 
 # The 4th positional arg, when given, selects the desktop meta package and
