@@ -9,10 +9,13 @@
 ### 目录
 
 ```
-sheng-deepin-rootfs_build.sh        # 构建脚本
+sheng-deepin-rootfs_build.sh        # Deepin 构建脚本（提取现成 arm64 用户态）
+sheng-openkylin-rootfs_build.sh     # openKylin 构建脚本（mmdebstrap/debootstrap 引导）
 lib/rootfs-common.sh                # 从上游 vendored 的公共库
-system_files/                       # 注入到镜像的设备服务/规则脚本
-.github/workflows/build-deepin.yml  # 自包含 CI workflow
+system_files/                       # 注入 Deepin 镜像的设备服务/规则脚本
+system_files_openkylin/             # openKylin 用的通用设备配置（NM/udev）
+.github/workflows/build-deepin.yml  # Deepin 自包含 CI workflow
+.github/workflows/build-openkylin.yml # openKylin 自包含 CI workflow
 ```
 
 ### 流水线（`sheng-deepin-rootfs_build.sh`）
@@ -36,6 +39,25 @@ system_files/                       # 注入到镜像的设备服务/规则脚�
    - `boot_mode`：`single`（默认）/ `dual` / `all`
    - `deepin_src_url`：留空用官方 arm64 ISO；或填 deepin-ports 的 flat rootfs / 板级镜像 URL
 4. 跑完在 **Artifacts** / **Release** 下载产物（下载与合并见 README）。
+
+### openKylin 流水线（`sheng-openkylin-rootfs_build.sh`）
+
+走的是**上游 debian-sheng / ubuntu-sheng 那套**（openKylin 有 arm64 官方归档，可从仓库引导）：
+
+1. **引导基础系统** — `mmdebstrap`（回退 `debootstrap`；套件名对 debootstrap 是未知的，
+   符号链接到通用 Ubuntu 脚本 `gutsy`）从 `http://archive.build.openkylin.top/openkylin/`
+   拉取，组件 `main cross pty`，用归档导出的 `openkylin-archive-keyring.gpg` 校验
+2. **写 apt 源** — `<suite>` / `<suite>-updates` / `<suite>-security`
+3. **桌面元包** — `OPENKYLIN_DESKTOP_META`（默认 `ukui`）**best-effort** 安装
+4. **注入** sheng 内核 `.deb` + 固件 + MIPPS；**通用设备修复**（qrtr、触摸校准、WiFi 固件、蓝牙 HID 开机加载、NM 去随机 MAC）
+5. **用户 / 主机名 / locale / 时区 / lightdm 自动登录 / fstab**
+6. Android sparse → gzip（与 Deepin 产物同构）
+
+参数：`openkylin_suite`（`nile` / `huanghe` / `nile.bedrock` / `yangtze`）、`openkylin_version`
+（仅用于命名）、`openkylin_desktop_meta`、`openkylin_mirror`。
+
+> ⚠️ 桌面元包名随 openKylin 版本可能不同，故用 **best-effort**：名字对不上只告警、不中断构建，
+> 仍产出可引导（可 SSH）的基础系统；按发行版实际情况覆盖 `OPENKYLIN_DESKTOP_META` 即可。
 
 ### 只构建 boot 镜像（轻量，不重建 rootfs）
 

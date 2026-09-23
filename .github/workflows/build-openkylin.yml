@@ -1,0 +1,202 @@
+# .github/workflows/build-openkylin.yml
+# Build an openKylin arm64 rootfs for Xiaomi Pad 6S Pro (sheng, SM8550).
+#
+# Approach (mirrors upstream ianchb/debian-sheng + code002-2/ubuntu-sheng):
+# bootstrap the base userland from openKylin's own arm64 apt archive with
+# mmdebstrap / debootstrap, then inject the sheng kernel .deb + firmware + MIPPS
+# and emit a fastboot-flashable sparse rootfs. The sheng kernel .deb is pulled
+# from this repo's *kernel-bundle-* releases.
+#
+# Output: openkylin_<ver>_<mode>_<ts>.img.gz  (Android-sparse ext4 rootfs)
+# Boot images (same kernel .deb):
+#   boot_sheng_singleboot.img  -> root=PARTLABEL=userdata  (single mode)
+#   boot_sheng_dualboot.img    -> root=PARTLABEL=linux     (dual mode)
+name: Build openKylin Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: '内核版本'
+        required: true
+        default: '7.1'
+      kernel_channel:
+        description: '内核通道'
+        required: true
+        type: choice
+        options: [stable, mainline]
+        default: 'stable'
+      boot_mode:
+        description: '启动模式'
+        required: true
+        type: choice
+        options: [single, dual, all]
+        default: 'single'
+      openkylin_suite:
+        description: 'openKylin 套件代号'
+        required: true
+        type: choice
+        options: [nile, huanghe, nile.bedrock, yangtze]
+        default: 'nile'
+      openkylin_version:
+        description: 'openKylin 版本号（仅用于产物命名）'
+        required: false
+        default: '2.0'
+      openkylin_desktop_meta:
+        description: '桌面元包（best-effort；留空=只出基础系统）'
+        required: false
+        default: 'ukui'
+      openkylin_mirror:
+        description: 'openKylin 归档镜像（留空=官方 archive.build.openkylin.top）'
+        required: false
+        default: ''
+      skip_release:
+        description: '跳过创建 GitHub Release'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # An openKylin desktop rootfs is several GiB; give the stock runner room.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean
+          df -h / || true
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl wget jq rsync xz-utils zstd unzip \
+            mmdebstrap debootstrap util-linux \
+            android-sdk-libsparse-utils
+
+      - name: Download sheng kernel .deb (from this repo's releases)
+        env:
+          KVER: ${{ inputs.kernel_version }}
+          CHANNEL: ${{ inputs.kernel_channel }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          got=0
+          for TAG in "kernel-bundle-${CHANNEL}-${KVER}" "kernel-bundle-${KVER}" kernel-bundle-latest; do
+            echo "==> trying release tag: ${TAG}"
+            if curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" -o rel.json; then
+              if jq -e '.assets | length > 0' rel.json >/dev/null 2>&1; then
+                jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url' rel.json | while read -r u; do
+                  echo "   download $(basename "$u")"
+                  curl -fsSL -O "$u"
+                done
+                got=1
+                break
+              fi
+            fi
+          done
+          [ "$got" -eq 1 ] || { echo "ERROR: no kernel release found"; exit 1; }
+          ls -la ./*.deb
+
+      - name: Build openKylin rootfs
+        env:
+          OPENKYLIN_SUITE: ${{ inputs.openkylin_suite }}
+          OPENKYLIN_VERSION: ${{ inputs.openkylin_version }}
+          OPENKYLIN_DESKTOP_META: ${{ inputs.openkylin_desktop_meta }}
+          OPENKYLIN_MIRROR: ${{ inputs.openkylin_mirror }}
+          FIRMWARE_URL: https://github.com/${{ github.repository }}/releases/download/kernel-bundle-${{ inputs.kernel_version }}/sheng-firmware-master.tar.gz
+          MIPPS_DEB_URL: https://github.com/${{ github.repository }}/releases/download/kernel-bundle-${{ inputs.kernel_version }}/xiaomi-mipps-auth.deb
+        run: |
+          set -euo pipefail
+          sudo -E bash sheng-openkylin-rootfs_build.sh \
+            openkylin-desktop "${{ inputs.kernel_version }}" "${{ inputs.boot_mode }}" "${{ inputs.openkylin_desktop_meta }}"
+          ls -la ./*.img.gz
+
+      - name: Build boot images from the kernel .deb
+        run: |
+          set -euo pipefail
+          deb=$(ls linux-xiaomi-sheng*.deb | head -1)
+          [ -n "$deb" ] || { echo "ERROR: linux-xiaomi-sheng.deb not found"; ls -la; exit 1; }
+          rm -rf kdeb && mkdir kdeb
+          dpkg-deb -x "$deb" kdeb
+          payload=""
+          for c in kdeb/boot/Image.gz-dtb_sheng kdeb/boot/zImage_sheng; do
+            [ -f "$c" ] && payload="$c" && break
+          done
+          if [ -z "$payload" ]; then
+            [ -f kdeb/boot/Image.gz ] && [ -f kdeb/boot/sm8550-xiaomi-sheng.dtb ] \
+              || { echo "ERROR: kernel payload missing in deb"; find kdeb/boot -type f; exit 1; }
+            cat kdeb/boot/Image.gz kdeb/boot/sm8550-xiaomi-sheng.dtb > zImage_sheng
+            payload=zImage_sheng
+          fi
+          echo "==> kernel payload: $payload"
+          python3 mkbootimg --kernel "$payload" \
+            --cmdline "root=PARTLABEL=userdata rootwait rw fsck.repair=yes" \
+            --base 0x00000000 --kernel_offset 0x00008000 --tags_offset 0x01e00000 --pagesize 4096 \
+            -o boot_sheng_singleboot.img
+          python3 mkbootimg --kernel "$payload" \
+            --cmdline "root=PARTLABEL=linux rootwait rw fsck.repair=yes" \
+            --base 0x00000000 --kernel_offset 0x00008000 --tags_offset 0x01e00000 --pagesize 4096 \
+            -o boot_sheng_dualboot.img
+          ls -la boot_sheng_*.img
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openkylin-rootfs-${{ inputs.boot_mode }}
+          path: |
+            openkylin_*.img.gz
+            boot_sheng_*.img
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Stage release assets (split >2 GiB, add boot images)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p release
+          cp boot_sheng_*.img release/ 2>/dev/null || true
+          for f in openkylin_*.img.gz; do
+            sz=$(stat -c %s "$f")
+            if [ "$sz" -gt 2000000000 ]; then
+              echo "==> ${f} is ${sz} bytes (>2 GiB); splitting into 1900M parts"
+              split -b 1900M -d -a 3 "$f" "release/${f}.part."
+            else
+              mv "$f" release/
+            fi
+          done
+          echo "==> release assets:"
+          ls -la release/
+
+      - name: Create release
+        if: ${{ !inputs.skip_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: openkylin-${{ github.run_number }}
+          name: "openKylin rootfs build ${{ github.run_number }}"
+          body: |
+            **openKylin arm64 rootfs — Xiaomi Pad 6S Pro (sheng)**
+
+            | 项目 | 详情 |
+            |------|------|
+            | 内核 | ${{ inputs.kernel_version }} / ${{ inputs.kernel_channel }} |
+            | openKylin | ${{ inputs.openkylin_version }} (${{ inputs.openkylin_suite }}) |
+            | 桌面元包 | ${{ inputs.openkylin_desktop_meta || '（无，仅基础系统）' }} |
+            | 启动模式 | ${{ inputs.boot_mode }} |
+            | 归档镜像 | ${{ inputs.openkylin_mirror || 'archive.build.openkylin.top（官方）' }} |
+
+            > GitHub Release 单资产上限 2 GiB，超过的镜像会按 1900M 分卷成 `*.part.000` …
+            > 合并 + 解压（一条命令）：
+            > `cat openkylin_*.img.gz.part.* | gzip -d > openkylin.img`
+          files: release/*

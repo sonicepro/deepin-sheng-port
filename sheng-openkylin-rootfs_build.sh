@@ -1,0 +1,348 @@
+#!/bin/bash
+# =============================================================================
+# sheng-openkylin-rootfs_build.sh — openKylin arm64 rootfs for Xiaomi Pad 6S Pro
+# =============================================================================
+# Approach A (bootstrap): unlike Deepin, openKylin PUBLISHES an arm64 apt
+# archive (http://archive.build.openkylin.top/openkylin/, dists + pool,
+# components "main cross pty"). So — exactly like the upstream ianchb/debian-sheng
+# and code002-2/ubuntu-sheng projects — we bootstrap the base userland straight
+# from the distribution's own repository (mmdebstrap, with a debootstrap
+# fallback), then inject the sheng kernel .deb + firmware + MIPPS, apply the
+# device quirks, and emit a fastboot-flashable sparse rootfs.
+#
+# (Deepin needed the other approach — unpack a prebuilt arm64 image — because its
+#  community mirror carries no arm64 packages at all; see
+#  sheng-deepin-rootfs_build.sh.)
+#
+# Self-contained: sources ./lib/rootfs-common.sh (vendored in this repo).
+# Driven by .github/workflows/build-openkylin.yml (runs-on: ubuntu-24.04-arm).
+#
+# Usage:
+#   sudo bash sheng-openkylin-rootfs_build.sh openkylin-desktop 7.1 single ukui
+#     args: <distro-variant> <kernel_version> [boot_mode: single|dual|all] [desktop_env]
+#           desktop_env = 桌面元包名（默认 ukui）；传 none/- 只出无桌面的基础系统
+#
+# Output (one per boot mode):
+#   openkylin_<ver>_<mode>_<ts>.img.gz   (Android-sparse ext4 rootfs, gzip)
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/rootfs-common.sh"
+
+# --- Configuration -----------------------------------------------------------
+# Empty IMAGE_SIZE => auto-size from the bootstrapped base (+ a desktop margin).
+IMAGE_SIZE="${IMAGE_SIZE:-}"
+UUID="${UUID:-ee8d3593-59b1-480e-a3b6-4fefb17ee7d8}"   # repo default
+
+# openKylin release. Default 2.0 "nile" (most documented). Other suites:
+#   huanghe (3.0) / nile.bedrock (2.0 SP2) / yangtze (1.0)
+OPENKYLIN_VERSION="${OPENKYLIN_VERSION:-2.0}"
+OPENKYLIN_SUITE="${OPENKYLIN_SUITE:-nile}"
+OPENKYLIN_MIRROR="${OPENKYLIN_MIRROR:-http://archive.build.openkylin.top/openkylin/}"
+OPENKYLIN_COMPONENTS="${OPENKYLIN_COMPONENTS:-main,cross,pty}"
+OPENKYLIN_KEYRING_URL="${OPENKYLIN_KEYRING_URL:-${OPENKYLIN_MIRROR}project/openkylin-archive-keyring.gpg}"
+OPENKYLIN_KEYRING_PATH="${OPENKYLIN_KEYRING_PATH:-/usr/share/keyrings/openkylin-archive-keyring.gpg}"
+
+# Desktop meta package. openKylin's desktop is UKUI; the exact meta name varies by
+# release (candidates: ukui, ukui-desktop-environment, kylin-desktop,
+# openkylin-desktop). Installed BEST-EFFORT — a miss warns, it does not fail the
+# build, so a bare (still bootable) base is always produced. Override via env.
+OPENKYLIN_DESKTOP_META="${OPENKYLIN_DESKTOP_META:-ukui}"
+
+ROOT_PASS="${ROOT_PASS:-1234}"
+USER_PASS="${USER_PASS:-luser}"
+USER_NAME="${USER_NAME:-luser}"
+SYSTEM_HOSTNAME="${SYSTEM_HOSTNAME:-sheng}"
+SYSTEM_LOCALE="${SYSTEM_LOCALE:-zh_CN.UTF-8}"
+SYSTEM_TIMEZONE="${SYSTEM_TIMEZONE:-Asia/Shanghai}"
+
+# Packages that MUST install for the image to be usable; the bootstrap fails
+# loudly if any is unavailable (all are standard in Debian/Ubuntu-derived bases).
+CORE_PACKAGES="apt,ca-certificates,systemd,systemd-sysv,sudo,openssh-server,network-manager,iproute2,kmod,udev,dbus,locales,e2fsprogs,util-linux,bash"
+
+# --- Args --------------------------------------------------------------------
+validate_args 2 4 $# '<distro-variant> <kernel_version> [boot_mode] [desktop_env]'
+validate_root
+
+DISTRO=$1
+KERNEL=$2
+TARGET_MODE=${3:-single}
+TARGET_FLAVOUR=${4:-}       # 4th arg selects the desktop meta (see below)
+
+# The 4th positional arg, when given, selects the desktop meta package and
+# overrides OPENKYLIN_DESKTOP_META. Pass "none" (or "-") to build a headless base.
+case "$TARGET_FLAVOUR" in
+    '')     : ;;                                   # keep env / default (ukui)
+    none|-) OPENKYLIN_DESKTOP_META="" ;;
+    *)      OPENKYLIN_DESKTOP_META="$TARGET_FLAVOUR" ;;
+esac
+
+TIMESTAMP=$(generate_timestamp)
+
+# --- Extraction/bootstrap tools (runner may not ship these; idempotent) -------
+_missing=0
+for _t in mmdebstrap debootstrap wget rsync xz zstd losetup; do
+    command -v "$_t" >/dev/null 2>&1 || _missing=1
+done
+if [ "$_missing" -eq 1 ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y --no-install-recommends \
+        mmdebstrap debootstrap wget rsync xz-utils zstd util-linux
+fi
+
+# --- openKylin archive keyring ----------------------------------------------
+download_openkylin_keyring() {
+    mkdir -p "$(dirname "$OPENKYLIN_KEYRING_PATH")"
+    [ -s "$OPENKYLIN_KEYRING_PATH" ] && return 0
+    echo "==> Fetching openKylin archive keyring: ${OPENKYLIN_KEYRING_URL}"
+    if ! wget -nv -O "$OPENKYLIN_KEYRING_PATH" "$OPENKYLIN_KEYRING_URL"; then
+        echo "ERROR: could not download the openKylin keyring; override OPENKYLIN_KEYRING_URL" >&2
+        rm -f "$OPENKYLIN_KEYRING_PATH"
+        return 1
+    fi
+}
+
+# --- Bootstrap the openKylin base userland into <dest> -----------------------
+# Tries mmdebstrap first (suite-agnostic), falls back to debootstrap (needs a
+# suite script; openKylin is Ubuntu-derived so 'gutsy' — debootstrap's generic
+# Ubuntu script — is symlinked in for the suite name).
+bootstrap_openkylin() {
+    local dest="$1"
+    mkdir -p "$dest"
+    local keyargs=()
+    [ -s "$OPENKYLIN_KEYRING_PATH" ] && keyargs=(--keyring="$OPENKYLIN_KEYRING_PATH")
+
+    local ok=0
+    if command -v mmdebstrap >/dev/null 2>&1; then
+        echo "==> Bootstrap (mmdebstrap ${OPENKYLIN_SUITE} -> ${dest})"
+        if mmdebstrap \
+              --architectures=arm64 \
+              --variant=minbase \
+              --components="$OPENKYLIN_COMPONENTS" \
+              "${keyargs[@]}" \
+              --include="$CORE_PACKAGES" \
+              --mode=root \
+              "$OPENKYLIN_SUITE" "$dest" "$OPENKYLIN_MIRROR"; then
+            ok=1
+        else
+            echo "WARN: mmdebstrap failed; falling back to debootstrap" >&2
+        fi
+    fi
+
+    # Sanity: a usable base needs apt-get + dpkg. If mmdebstrap produced a husk
+    # (e.g. it didn't recognise the suite), retry with debootstrap.
+    if [ "$ok" -eq 1 ] && [ ! -x "$dest/usr/bin/apt-get" ]; then
+        echo "WARN: mmdebstrap produced a base without apt-get; retrying with debootstrap" >&2
+        ok=0
+    fi
+
+    if [ "$ok" -eq 0 ]; then
+        command -v debootstrap >/dev/null 2>&1 \
+            || { echo "ERROR: neither a working mmdebstrap nor debootstrap is available" >&2; return 1; }
+        local sdir="/usr/share/debootstrap/scripts"
+        [ -e "$sdir/$OPENKYLIN_SUITE" ] || ln -sf gutsy "$sdir/$OPENKYLIN_SUITE"
+        echo "==> Bootstrap (debootstrap ${OPENKYLIN_SUITE} -> ${dest})"
+        debootstrap --arch=arm64 --variant=minbase \
+            --components="$OPENKYLIN_COMPONENTS" \
+            "${keyargs[@]}" \
+            --include="$CORE_PACKAGES" \
+            "$OPENKYLIN_SUITE" "$dest" "$OPENKYLIN_MIRROR"
+    fi
+
+    [ -x "$dest/usr/bin/apt-get" ] \
+        || { echo "ERROR: bootstrap failed: no /usr/bin/apt-get in the target" >&2; return 1; }
+    echo "    base userland ready"
+}
+
+# --- openKylin / lightdm autologin (UKUI uses lightdm) -----------------------
+setup_openkylin_autologin() {
+    local rootdir="$1" user="$2"
+    mkdir -p "$rootdir/etc/lightdm/lightdm.conf.d"
+    cat > "$rootdir/etc/lightdm/lightdm.conf.d/00-sheng-autologin.conf" <<EOF
+[Seat:*]
+autologin-user=${user}
+autologin-user-timeout=0
+EOF
+}
+
+# --- Bootstrap once up front (so we can size the image to fit) ---------------
+echo "==> Bootstrapping openKylin ${OPENKYLIN_VERSION} (${OPENKYLIN_SUITE}) arm64..."
+STAGE="$(mktemp -d)"
+download_openkylin_keyring
+bootstrap_openkylin "$STAGE"
+base_mb=$(du -sm "$STAGE" | cut -f1)
+echo "==> Bootstrapped base: ${base_mb} MiB"
+
+if [ -z "$IMAGE_SIZE" ]; then
+    # +3 GiB headroom: a desktop install, the kernel/firmware payloads and ext4
+    # metadata all land after this, and du undercounts hardlinked content.
+    IMAGE_SIZE="$((base_mb + 3072))M"
+fi
+echo "==> Target image size: ${IMAGE_SIZE}"
+
+# --- Build loop over boot modes ---------------------------------------------
+mapfile -t BOOTMODES < <(parse_boot_modes "$TARGET_MODE") || exit 1
+MODES_LEFT=${#BOOTMODES[@]}
+
+for MODE in "${BOOTMODES[@]}"; do
+    echo ""
+    echo "======================================================"
+    echo "构建 openKylin ${OPENKYLIN_VERSION} | 模式: $MODE"
+    echo "======================================================"
+
+    preflight_checks 10240
+
+    ROOTFS_IMG="openkylin_${OPENKYLIN_VERSION}_${MODE}_${TIMESTAMP}.img"
+
+    # 1. Create the ext4 image and mount it at $ROOTDIR
+    create_image "$IMAGE_SIZE" "$ROOTFS_IMG" "$UUID"
+    setup_chroot_mounts "$ROOTDIR"
+    trap_teardown "$ROOTDIR"
+
+    # 2. Flatten the bootstrapped base into the image (preserve perms/xattrs).
+    echo "==> Copying base into ${ROOTFS_IMG}..."
+    rsync -aHAX --numeric-ids "$STAGE/" "$ROOTDIR/"
+
+    # Free the staging tree before the (space-hungry) sparse pack, unless a
+    # later boot mode still needs it.
+    MODES_LEFT=$((MODES_LEFT - 1))
+    [ "$MODES_LEFT" -eq 0 ] && rm -rf "$STAGE"
+
+    # 3. DNS inside chroot
+    setup_dns "$ROOTDIR" 223.5.5.5 1.1.1.1 8.8.8.8
+
+    # 3b. apt sources. mmdebstrap/debootstrap wrote a minimal list; make it
+    # explicit + add the -updates/-security pockets (openKylin uses Ubuntu-style
+    # pocket names). Components are exactly "main cross pty".
+    cat > "$ROOTDIR/etc/apt/sources.list" <<EOF
+deb ${OPENKYLIN_MIRROR} ${OPENKYLIN_SUITE} main cross pty
+deb ${OPENKYLIN_MIRROR} ${OPENKYLIN_SUITE}-updates main cross pty
+deb ${OPENKYLIN_MIRROR} ${OPENKYLIN_SUITE}-security main cross pty
+EOF
+    echo "==> apt-get update (populate package lists)..."
+    chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update" >/dev/null 2>&1 || true
+
+    # 4. Desktop meta (best-effort). A wrong/renamed meta must not sink the
+    #    build: the base stays bootable and reachable over SSH.
+    if [ -n "$OPENKYLIN_DESKTOP_META" ]; then
+        echo "==> Installing desktop meta: ${OPENKYLIN_DESKTOP_META} (best-effort)..."
+        if chroot "$ROOTDIR" bash -c \
+             "export DEBIAN_FRONTEND=noninteractive; apt-get install -y ${OPENKYLIN_DESKTOP_META}"; then
+            echo "    desktop installed: ${OPENKYLIN_DESKTOP_META}"
+        else
+            echo "WARN: desktop meta '${OPENKYLIN_DESKTOP_META}' did not install; base image only" >&2
+        fi
+    fi
+
+    # 4b. Optional device helper packages (best-effort; names vary by suite).
+    chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y qrtr" >/dev/null 2>&1 || true
+
+    # 5. Inject the sheng kernel .deb (placed in cwd by the workflow)
+    echo "==> Injecting sheng kernel .deb..."
+    inject_deb_kernel "$ROOTDIR" "./*.deb"
+
+    # 5b. Firmware. Same two problems as on Deepin: the shipped
+    #     firmware-xiaomi-sheng .deb lands blobs under /usr/lib/<driver>/ (the
+    #     kernel only searches /lib/firmware/), and it omits the Adreno GPU
+    #     firmware (qcom/a740_sqe.fw + qcom/gmu_gen70200.bin) that the display
+    #     needs. Copy the deb's blobs into /lib/firmware/ then overlay the full
+    #     source-repo firmware set.
+    echo "==> Installing sheng firmware into /lib/firmware/..."
+    mkdir -p "$ROOTDIR/lib/firmware"
+    for _d in ath12k cirrus novatek qca qcom nanosic; do
+        [ -d "$ROOTDIR/usr/lib/$_d" ] && cp -a "$ROOTDIR/usr/lib/$_d" "$ROOTDIR/lib/firmware/"
+    done
+    fwdir="$(mktemp -d)"
+    wget -nv -O "$fwdir/fw.tar.gz" \
+        "${FIRMWARE_URL:-https://github.com/sonicepro/deepin-sheng-port/releases/download/kernel-bundle-7.1/sheng-firmware-master.tar.gz}"
+    tar -xzf "$fwdir/fw.tar.gz" -C "$fwdir"
+    fwsrc="$(find "$fwdir" -maxdepth 1 -mindepth 1 -type d -name 'sheng-firmware-*' | head -1)"
+    [ -n "$fwsrc" ] && cp -a "$fwsrc"/. "$ROOTDIR/lib/firmware/"
+    rm -rf "$fwdir"
+    echo "    /lib/firmware/qcom:"; ls "$ROOTDIR/lib/firmware/qcom" 2>/dev/null || true
+
+    # 5c. Xiaomi MIPPS 120W charger authentication (kernel already exposes the
+    #     pmic-glink xiaomi sysfs node; this daemon + udev rule do the handshake).
+    echo "==> Installing Xiaomi MIPPS auth (120W charging)..."
+    _mipps="$(mktemp -d)/mipps.deb"
+    if wget -nv -O "$_mipps" "${MIPPS_DEB_URL:-https://github.com/sonicepro/deepin-sheng-port/releases/download/kernel-bundle-7.1/xiaomi-mipps-auth.deb}"; then
+        dpkg-deb --fsys-tarfile "$_mipps" | tar -x --keep-directory-symlink -C "$ROOTDIR/"
+        echo "    installed /usr/libexec/xiaomi-mipps-auth (+ service + udev rule)"
+    else
+        echo "    WARN: MIPPS deb download failed; 120W charging auth skipped" >&2
+    fi
+    rm -rf "$(dirname "$_mipps")"
+
+    # 6. Device quirks (shared helpers from lib/rootfs-common.sh).
+    # NB: no setup_getty_ttyMSM0 — the kernel disables the geni serial
+    # (cmdline qcom_geni_serial.con_enabled=0), so /dev/ttyMSM0 does not exist.
+    setup_qrtr_service "$ROOTDIR"
+    if [ ! -e "$ROOTDIR/usr/bin/qrtr-ns" ]; then
+        mkdir -p "$ROOTDIR/etc/systemd/system/qrtr-ns.service.d"
+        printf '[Unit]\nConditionPathExists=/usr/bin/qrtr-ns\n' \
+            > "$ROOTDIR/etc/systemd/system/qrtr-ns.service.d/10-skip-if-absent.conf"
+    fi
+    configure_touchscreen "$ROOTDIR"
+    fix_wifi_firmware "$ROOTDIR"
+
+    # Bluetooth HID (mice/keyboards) goes through uhid (BLE) / hidp (BR-EDR);
+    # both are modules nothing auto-loads, so a paired mouse can't connect until
+    # they're loaded at boot.
+    printf 'uhid\nhidp\n' > "$ROOTDIR/etc/modules-load.d/sheng-bluetooth-hid.conf"
+
+    # Remove any NetworkManager connections the base might ship, so first boot
+    # never tries a foreign (wrong) profile before the user's own.
+    rm -f "$ROOTDIR"/etc/NetworkManager/system-connections/*.nmconnection 2>/dev/null || true
+
+    # 6b. Device system files (generic-only overlay; NOT the Deepin/DDE
+    #     system_files/, which is full of DDE-specific units).
+    if [ -d "$SCRIPT_DIR/system_files_openkylin" ]; then
+        cp -a "$SCRIPT_DIR/system_files_openkylin/." "$ROOTDIR/"
+        chmod 0755 "$ROOTDIR"/usr/local/sbin/*.sh 2>/dev/null || true
+    fi
+
+    # 7. Users + hostname + locale + timezone.
+    setup_users "$ROOTDIR" "$ROOT_PASS" "$USER_NAME" "$USER_PASS" \
+        "sudo,audio,video,render,input,plugdev,netdev"
+    echo "${SYSTEM_HOSTNAME}" > "$ROOTDIR/etc/hostname"
+    printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n' "$SYSTEM_HOSTNAME" > "$ROOTDIR/etc/hosts"
+    printf 'LANG=%s\n' "$SYSTEM_LOCALE" > "$ROOTDIR/etc/default/locale"
+    printf '%s\n'        "$SYSTEM_LOCALE" > "$ROOTDIR/etc/locale.conf" 2>/dev/null || true
+    # Generate the locales (locales is in CORE_PACKAGES). Duplicate lines in
+    # locale.gen are harmless, so we just append both entries unconditionally.
+    {
+        printf '%s UTF-8\n' "$SYSTEM_LOCALE"
+        printf 'en_US.UTF-8 UTF-8\n'
+    } >> "$ROOTDIR/etc/locale.gen"
+    chroot "$ROOTDIR" locale-gen >/dev/null 2>&1 || true
+    chroot "$ROOTDIR" ln -sf "/usr/share/zoneinfo/${SYSTEM_TIMEZONE}" /etc/localtime 2>/dev/null || true
+    printf '%s\n' "$SYSTEM_TIMEZONE" > "$ROOTDIR/etc/timezone"
+
+    # 8. Autologin + services + default graphical target (best effort).
+    setup_openkylin_autologin "$ROOTDIR" "$USER_NAME"
+    chroot "$ROOTDIR" systemctl enable NetworkManager 2>/dev/null || true
+    chroot "$ROOTDIR" systemctl enable ssh  2>/dev/null || chroot "$ROOTDIR" systemctl enable sshd 2>/dev/null || true
+    chroot "$ROOTDIR" systemctl set-default graphical.target 2>/dev/null || true
+
+    # 9. fstab (bound by PARTLABEL, matches the boot.img cmdline)
+    generate_fstab "$ROOTDIR" "$MODE"
+
+    # 10. Unmount, stamp UUID, convert to Android sparse (.img) + gzip.
+    # Emit the sparse image DIRECTLY (no 7z wrapper): GitHub artifacts download
+    # as a .zip, so a bare .img means a single extraction; in the release the
+    # split parts `cat` straight into the flashable image.
+    teardown_mounts "$ROOTDIR"
+    apply_fs_uuid "$UUID" "$ROOTFS_IMG"
+    echo "==> Converting ${ROOTFS_IMG} to Android sparse + gzip..."
+    img2simg "$ROOTFS_IMG" "sparse_${ROOTFS_IMG}"
+    rm -f "$ROOTFS_IMG"
+    gzip -6 "sparse_${ROOTFS_IMG}"
+    mv "sparse_${ROOTFS_IMG}.gz" "${ROOTFS_IMG}.gz"
+    echo "==> Image: ${ROOTFS_IMG}.gz ($(du -h "${ROOTFS_IMG}.gz" | cut -f1))  (gzip -d -> ${ROOTFS_IMG})"
+
+    echo "[MODE=$MODE] 完成！"
+done
+
+echo "[OK] openKylin arm64 rootfs build complete!"

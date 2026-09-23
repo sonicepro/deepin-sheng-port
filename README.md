@@ -19,6 +19,25 @@ sheng 内核/固件，做成可 `fastboot` 刷入的镜像。**全部在 GitHub 
 所以本仓库：**取现成 arm64 用户态 → 摊平成 ext4 → 注入 sheng 内核 .deb + 设备修复
 → 打成可刷 rootfs**。
 
+## openKylin 构建脚本（可选）
+
+仓库另外附带把 **openKylin（`nile` 2.0 / `huanghe` 3.0 / `nile.bedrock` 2.0 SP2 /
+`yangtze` 1.0）arm64** 做成同款可刷 rootfs 的脚本 `sheng-openkylin-rootfs_build.sh` 与
+workflow **Build openKylin Desktop**。
+
+与 Deepin 的关键差异：**openKylin 有 arm64 apt 归档**
+（`http://archive.build.openkylin.top/openkylin/`，组件 `main cross pty`），所以走
+**上游 debian-sheng / ubuntu-sheng 那条路**——用 mmdebstrap（回退 debootstrap）
+**从官方仓库直接引导**基础系统，再注入 sheng 内核/固件/MIPPS 并做设备修复，
+**不需要**取现成镜像。
+
+- 产物：`openkylin_<版本>_<模式>_<时间>.img.gz`，刷机/合并方式与 Deepin 产物完全一致。
+- 触发：Actions → **Build openKylin Desktop** → Run workflow（`openkylin_suite` 默认 `nile`）。
+- 桌面元包默认 `ukui`，**best-effort** 安装：名字对不上只告警、不中断，仍会产出可引导的
+  基础系统（可用 workflow 输入 / `OPENKYLIN_DESKTOP_META` 覆盖）。
+- 设备级修复只带**通用**部分（WiFi 固定 MAC、蓝牙 HID 模块、隐藏小分区、MIPPS 120W）；
+  Deepin/DDE 专属（linglong、onboard、polkit 可拖动、电源 AC、提示音）**不适用**、未移植。
+
 ## 下载
 
 产物随每次构建下发，二选一：
