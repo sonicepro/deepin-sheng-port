@@ -220,8 +220,17 @@ for MODE in "${BOOTMODES[@]}"; do
     MODES_LEFT=$((MODES_LEFT - 1))
     [ "$MODES_LEFT" -eq 0 ] && rm -rf "$STAGE"
 
-    # 3. DNS inside chroot
-    setup_dns "$ROOTDIR" 223.5.5.5 1.1.1.1 8.8.8.8
+    # 3. DNS inside chroot. Prefer the RUNNER's own resolvers: GitHub runners
+    #    resolve through an internal nameserver and commonly can't reach
+    #    8.8.8.8/1.1.1.1 directly -- a chroot apt seeded only with public DNS then
+    #    fails name resolution and installs nothing (silently), which is exactly
+    #    why the "grow the base via chroot apt" step produced a ~283MB image with
+    #    no desktop. Keep public DNS as a fallback.
+    {
+        grep -E '^[[:space:]]*nameserver' /etc/resolv.conf 2>/dev/null || true
+        echo 'nameserver 8.8.8.8'
+        echo 'nameserver 1.1.1.1'
+    } > "$ROOTDIR/etc/resolv.conf"
 
     # 3b. apt sources. mmdebstrap/debootstrap wrote a minimal list; make it
     # explicit + add the -updates/-security pockets (openKylin uses Ubuntu-style
@@ -275,6 +284,10 @@ EOF
             echo "WARN: desktop meta '${OPENKYLIN_DESKTOP_META}' did not install; base image only" >&2
         fi
     fi
+
+    # Diagnostic: how big is the rootfs and how many packages landed? If the
+    # chroot apt couldn't reach the network this stays tiny (~283MB image).
+    echo "==> Rootfs after core+desktop: $(du -sm "$ROOTDIR" | cut -f1) MiB, $(chroot "$ROOTDIR" bash -c 'dpkg -l 2>/dev/null | grep -c "^ii"' || echo 0) packages"
 
     # 4b. Optional device helper packages (best-effort; names vary by suite).
     chroot "$ROOTDIR" bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get install -y qrtr" >/dev/null 2>&1 || true
