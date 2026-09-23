@@ -79,7 +79,7 @@ if [ "$_missing" -eq 1 ]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y --no-install-recommends \
-        squashfs-tools zstd unzip rsync xz-utils util-linux
+        squashfs-tools zstd unzip rsync xz-utils util-linux aria2 pigz
 fi
 
 # --- Download the openKylin image once ---------------------------------------
@@ -89,8 +89,16 @@ DLDIR="$(mktemp -d)"
 src_name="$(basename "${OPENKYLIN_IMG_URL%%\?*}")"
 { [ -n "${src_name}" ] && [ "${src_name}" != "/" ]; } || src_name="openkylin-img"
 src_file="${DLDIR}/${src_name}"
-echo "==> Fetching openKylin image: ${OPENKYLIN_IMG_URL}"
-wget -nv -O "${src_file}" "${OPENKYLIN_IMG_URL}"
+# Parallel download (aria2c) — the image is several GiB from openKylin's CDN
+# (China), so a multi-connection fetch is markedly faster than single-stream wget.
+if command -v aria2c >/dev/null 2>&1; then
+    echo "==> Fetching openKylin image (aria2c -x16): ${OPENKYLIN_IMG_URL}"
+    aria2c -x16 -s16 -k1M -c --max-tries=5 --retry-wait=3 \
+        -d "$DLDIR" -o "$src_name" "$OPENKYLIN_IMG_URL"
+else
+    echo "==> Fetching openKylin image (wget): ${OPENKYLIN_IMG_URL}"
+    wget -nv -O "${src_file}" "${OPENKYLIN_IMG_URL}"
+fi
 echo "==> Source size: $(du -h "${src_file}" | cut -f1)"
 
 # fetch_rootfs <archive> <dest_dir>  — materialize the root filesystem tree
@@ -127,7 +135,7 @@ fetch_rootfs() {
             local sq
             for sq in "${sqs[@]}"; do
                 echo "    squashfs: ${sq#"$mnt"/}"
-                unsquashfs -f -d "$dest" "$sq"
+                unsquashfs -f -d "$dest" -processors "$(nproc)" "$sq"
             done
             # Keep a live package manifest if present (for a dpkg-db rebuild).
             local pl; pl="$(find "$mnt" -maxdepth 6 \( -iname 'filesystem.manifest' -o -iname 'filesystem.packages' \) | head -1)"
@@ -364,7 +372,12 @@ for MODE in "${BOOTMODES[@]}"; do
     echo "==> Converting ${ROOTFS_IMG} to Android sparse + gzip..."
     img2simg "$ROOTFS_IMG" "sparse_${ROOTFS_IMG}"
     rm -f "$ROOTFS_IMG"
-    gzip -6 "sparse_${ROOTFS_IMG}"
+    # Parallel gzip (pigz, all cores) — the sparse image compresses well.
+    if command -v pigz >/dev/null 2>&1; then
+        pigz -4 "sparse_${ROOTFS_IMG}"
+    else
+        gzip -6 "sparse_${ROOTFS_IMG}"
+    fi
     mv "sparse_${ROOTFS_IMG}.gz" "${ROOTFS_IMG}.gz"
     echo "==> Image: ${ROOTFS_IMG}.gz ($(du -h "${ROOTFS_IMG}.gz" | cut -f1))  (gzip -d -> ${ROOTFS_IMG})"
 
