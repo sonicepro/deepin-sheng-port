@@ -1,8 +1,13 @@
-# Hide sheng's sub-1GiB partitions / removable stubs from udisks2 (and therefore
-# the file manager's "Computer" view).
+# Hide sheng's sub-1GiB internal UFS stub partitions from udisks2 (and therefore
+# the file manager's "Computer" view) WITHOUT hiding external media (USB/SD).
 # sheng: sda1..sda27 are all under 1GiB; sda28=11G sda29=119G sda30=1.2G sda31=111G.
-KERNEL=="sda[1-9]", ENV{UDISKS_IGNORE}="1"
-KERNEL=="sda1[0-9]", ENV{UDISKS_IGNORE}="1"
-KERNEL=="sda2[0-7]", ENV{UDISKS_IGNORE}="1"
-KERNEL=="sd[b-z]", ENV{UDISKS_IGNORE}="1"
-KERNEL=="sd[b-z][0-9]*", ENV{UDISKS_IGNORE}="1"
+# The extra UFS LUNs (scsi 0:0:0:1..5 -> sdb..sdf) are internal stubs as well.
+#
+# Scope every rule to the internal UFS controller via ID_PATH. The old rules used
+# KERNEL=="sd[b-z]" which also matched a plugged-in USB disk (e.g. /dev/sdg) and
+# set UDISKS_IGNORE=1 on it -> the USB stick was invisible in the file manager.
+ENV{ID_PATH}=="platform-1d84000.ufshc-*", KERNEL=="sda[1-9]", ENV{UDISKS_IGNORE}="1"
+ENV{ID_PATH}=="platform-1d84000.ufshc-*", KERNEL=="sda1[0-9]", ENV{UDISKS_IGNORE}="1"
+ENV{ID_PATH}=="platform-1d84000.ufshc-*", KERNEL=="sda2[0-7]", ENV{UDISKS_IGNORE}="1"
+ENV{ID_PATH}=="platform-1d84000.ufshc-*", KERNEL=="sd[b-z]", ENV{UDISKS_IGNORE}="1"
+ENV{ID_PATH}=="platform-1d84000.ufshc-*", KERNEL=="sd[b-z][0-9]*", ENV{UDISKS_IGNORE}="1"
