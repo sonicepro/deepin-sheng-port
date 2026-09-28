@@ -302,7 +302,7 @@ for MODE in "${BOOTMODES[@]}"; do
     done
     fwdir="$(mktemp -d)"
     wget -nv -O "$fwdir/fw.tar.gz" \
-        "${FIRMWARE_URL:-https://github.com/sonicepro/deepin-sheng-port/releases/download/kernel-bundle-7.1/sheng-firmware-master.tar.gz}"
+        "${FIRMWARE_URL:-https://github.com/sonicepro/deepin-sheng-port/releases/download/kernel-bundle-7.2.6/sheng-firmware-master.tar.gz}"
     tar -xzf "$fwdir/fw.tar.gz" -C "$fwdir"
     fwsrc="$(find "$fwdir" -maxdepth 1 -mindepth 1 -type d -name 'sheng-firmware-*' | head -1)"
     [ -n "$fwsrc" ] && cp -a "$fwsrc"/. "$ROOTDIR/lib/firmware/"
@@ -312,7 +312,7 @@ for MODE in "${BOOTMODES[@]}"; do
     # 4c. Xiaomi MIPPS 120W charger authentication.
     echo "==> Installing Xiaomi MIPPS auth (120W charging)..."
     _mipps="$(mktemp -d)/mipps.deb"
-    if wget -nv -O "$_mipps" "${MIPPS_DEB_URL:-https://github.com/sonicepro/deepin-sheng-port/releases/download/kernel-bundle-7.1/xiaomi-mipps-auth.deb}"; then
+    if wget -nv -O "$_mipps" "${MIPPS_DEB_URL:-https://github.com/sonicepro/deepin-sheng-port/releases/download/kernel-bundle-7.2.6/xiaomi-mipps-auth.deb}"; then
         dpkg-deb --fsys-tarfile "$_mipps" | tar -x --keep-directory-symlink -C "$ROOTDIR/"
         echo "    installed /usr/libexec/xiaomi-mipps-auth (+ service + udev rule)"
     else

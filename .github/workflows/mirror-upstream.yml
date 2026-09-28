@@ -1,16 +1,19 @@
 # .github/workflows/mirror-upstream.yml
-# Mirror the upstream sheng driver bundle into *this* repo, so the build
-# workflows never depend on the (moved / wiped) upstream release repos again.
-# Run once per upstream kernel version, before Build Deepin 25 / bootimg.
+# Mirror the sheng driver bundle into *this* repo, so the build workflows never
+# depend on the (moved / wiped) upstream release repos again.
+# Run once per kernel version, before building the rootfs / bootimage.
 #
-#   kernel bundle : code002-2/sheng-linux-build  @ kernel-bundle-<ver>
-#   firmware      : alghiffaryfa19/sheng-firmware (master tarball)
-#   MIPPS auth    : ianchb/xiaomi-mipps-auth      @ latest tag
+# The *kernel* and the *device packages* may come from different upstreams: the
+# prebuilt kernel .deb is taken by explicit URL (e.g. ianchb/sm8550-mainline
+# 7.2.6), while the distro-agnostic device packages (alsa, firmware-xiaomi-sheng,
+# fastrpc, libssc, iio-sensor-proxy, sheng-devauth, sheng-sensors) are reused
+# from the code002-2/sheng-linux-build bundle — they don't depend on the kernel
+# version. MIPPS auth deb and the firmware tarball are fetched as before.
 #
-# Output: a release tagged `kernel-bundle-<ver>` in this repo holding exactly
-# what the build consumes:
-#   - every .deb from the upstream kernel bundle (kernel, firmware, alsa,
-#     fastrpc, iio-sensor-proxy, libssc, sheng-devauth, sheng-sensors)
+# Output: a release tagged `kernel-bundle-<kernel_version>` in this repo holding
+# exactly what the build consumes:
+#   - linux-xiaomi-sheng.deb        (the kernel, from kernel_deb_url)
+#   - the device-package .debs      (from device_bundle_repo @ kernel-bundle-<ver>)
 #   - sheng-firmware-master.tar.gz  (full firmware overlay)
 #   - xiaomi-mipps-auth.deb         (120W charger auth, fixed name)
 name: Mirror upstream sheng assets
@@ -19,13 +22,21 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: '内核版本（对应上游 kernel-bundle-<ver>）'
+        description: '输出 release 的版本号（tag: kernel-bundle-<ver>）'
         required: true
-        default: '7.1'
-      upstream_kernel_repo:
-        description: '上游内核包仓库'
+        default: '7.2.6'
+      kernel_deb_url:
+        description: '内核 .deb 直链（linux-xiaomi-sheng.deb）'
+        required: true
+        default: 'https://github.com/ianchb/sm8550-mainline/releases/download/7.2.6/linux-xiaomi-sheng.deb'
+      device_bundle_repo:
+        description: '设备功能包（与内核版本无关）来源仓库'
         required: true
         default: 'code002-2/sheng-linux-build'
+      device_bundle_ver:
+        description: '设备功能包所在的 kernel-bundle 标签'
+        required: true
+        default: '7.1'
       firmware_url:
         description: '固件 tarball 来源 URL'
         required: true
@@ -45,21 +56,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download kernel bundle .deb assets
+      - name: Download device-package .debs (from the device bundle)
         env:
-          KVER: ${{ inputs.kernel_version }}
-          UPSTREAM: ${{ inputs.upstream_kernel_repo }}
+          UPSTREAM: ${{ inputs.device_bundle_repo }}
+          DVER: ${{ inputs.device_bundle_ver }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p vendor
           rel="${RUNNER_TEMP:-/tmp}/rel.json"
           curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${UPSTREAM}/releases/tags/kernel-bundle-${KVER}" -o "$rel"
+            "https://api.github.com/repos/${UPSTREAM}/releases/tags/kernel-bundle-${DVER}" -o "$rel"
           cd vendor
-          jq -r '.assets[].browser_download_url' "$rel" | grep -E '\.deb$' \
+          # every .deb EXCEPT the kernel itself (that comes from kernel_deb_url)
+          jq -r '.assets[].browser_download_url' "$rel" \
+            | grep -E '\.deb$' | grep -vE '/linux-xiaomi-sheng' \
             | while read -r u; do echo "  + $(basename "$u")"; curl -fsSL -O "$u"; done
-          echo "==> kernel bundle debs:"; ls -la
+          echo "==> device-package debs:"; ls -la
+
+      - name: Download kernel .deb
+        env:
+          KDEB_URL: ${{ inputs.kernel_deb_url }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o vendor/linux-xiaomi-sheng.deb "$KDEB_URL"
+          echo "==> kernel deb:"; ls -la vendor/linux-xiaomi-sheng.deb
 
       - name: Download firmware tarball
         env:
@@ -93,9 +114,10 @@ jobs:
             Mirror of the sheng driver bundle for Xiaomi Pad 6S Pro (sheng), so
             the build workflows are self-contained.
 
-            | 资产 | 上游来源 |
-            |------|----------|
-            | 内核/固件/驱动 `.deb` | `${{ inputs.upstream_kernel_repo }}` @ `kernel-bundle-${{ inputs.kernel_version }}` |
+            | 资产 | 来源 |
+            |------|------|
+            | 内核 `linux-xiaomi-sheng.deb` | `${{ inputs.kernel_deb_url }}` |
+            | 设备功能包 `.deb` | `${{ inputs.device_bundle_repo }}` @ `kernel-bundle-${{ inputs.device_bundle_ver }}` |
             | 固件 tarball | `${{ inputs.firmware_url }}` |
             | MIPPS 快充认证 deb | `${{ inputs.mipps_repo }}` (latest) |
           files: vendor/*
