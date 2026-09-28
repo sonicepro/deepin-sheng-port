@@ -1,0 +1,17 @@
+[Unit]
+Description=Pin s2idle as the default suspend state (sheng/SM8550 "deep" is unreliable)
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# On sheng (SM8550) the "deep" suspend state is unreliable: it either self-wakes a
+# few seconds in (worst while charging on the 120W brick) or fails to resume
+# cleanly, so a power-key suspend makes the device hard/impossible to wake.
+# s2idle (suspend-to-idle) resumes correctly, so pin it as the default.
+# Harmless no-op if the kernel does not offer s2idle.
+ExecStart=/bin/sh -c 'grep -qw s2idle /sys/power/mem_sleep && echo s2idle > /sys/power/mem_sleep || true'
+
+[Install]
+WantedBy=multi-user.target

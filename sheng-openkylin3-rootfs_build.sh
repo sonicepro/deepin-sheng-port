@@ -351,6 +351,11 @@ for MODE in "${BOOTMODES[@]}"; do
     #     q6 APM boot race (same workaround as the Deepin build).
     chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
 
+    # Suspend state: sheng/SM8550's "deep" suspend is unreliable (self-wakes a few
+    # seconds in, or fails to resume, so a power-key suspend is hard to wake from).
+    # Pin s2idle, which resumes correctly.
+    chroot "$ROOTDIR" systemctl enable sheng-mem-sleep.service 2>/dev/null || true
+
     # 6. Users + hostname + locale + timezone.
     setup_users "$ROOTDIR" "$ROOT_PASS" "$USER_NAME" "$USER_PASS" \
         "sudo,audio,video,render,input,plugdev,netdev,network"
