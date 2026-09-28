@@ -356,6 +356,7 @@ EOF
             > "$ROOTDIR/etc/systemd/system/qrtr-ns.service.d/10-skip-if-absent.conf"
     fi
     configure_touchscreen "$ROOTDIR"
+    install_touch_processor "$ROOTDIR"
     fix_wifi_firmware "$ROOTDIR"
 
     # Bluetooth HID (mice/keyboards) goes through uhid (BLE) / hidp (BR-EDR);

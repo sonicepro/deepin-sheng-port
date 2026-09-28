@@ -328,6 +328,7 @@ for MODE in "${BOOTMODES[@]}"; do
             > "$ROOTDIR/etc/systemd/system/qrtr-ns.service.d/10-skip-if-absent.conf"
     fi
     configure_touchscreen "$ROOTDIR"
+    install_touch_processor "$ROOTDIR"
     fix_wifi_firmware "$ROOTDIR"
 
     # Bluetooth HID (mice/keyboards): uhid (BLE) / hidp (BR-EDR) modules.

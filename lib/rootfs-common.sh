@@ -71,6 +71,43 @@ configure_touchscreen() {
 }
 
 # ---------------------------------------------------------------------------
+# install_touch_processor  — 安装 7.x 内核所需的用户态触摸进程
+#   kernel >=7.x 的 nt36532e 触摸驱动（驱动名 NVT-ts-spi）不再注册内核 input
+#   设备，只把原始 THP 帧暴露在 /proc/nvt_thp_stream（status 里 kernel_input:
+#   disabled，是设计不是故障）。必须由用户态进程 xiaomi-sheng-thp 读帧、经
+#   uinput 建出触摸屏 —— 否则触摸完全不动。它依赖 libssc（openKylin 源里没有）。
+#   uinput 模块由 /etc/modules-load.d/sheng-touch.conf 在开机加载。
+#   参数: <rootdir>
+# ---------------------------------------------------------------------------
+install_touch_processor() {
+    local rootdir="$1"
+    local tmp; tmp="$(mktemp -d)"
+    local _url _base _ok=0
+    for _url in \
+        "https://github.com/code002-2/sheng-linux-build/releases/download/kernel-bundle-7.1/libssc_0.4.2-1_arm64.deb" \
+        "https://github.com/ianchb/xiaomi-sheng-thp/releases/download/v0.3.9/xiaomi-sheng-thp_0.3.9_arm64.deb" ; do
+        _base="$(basename "${_url%%\?*}")"
+        if wget -nv -O "$tmp/$_base" "$_url" \
+           && dpkg-deb --fsys-tarfile "$tmp/$_base" | tar -x --keep-directory-symlink -C "$rootdir/"; then
+            _ok=1
+        else
+            echo "  警告: 触摸组件获取/解包失败: $_url" >&2
+        fi
+    done
+    rm -rf "$tmp"
+    if [ "$_ok" -eq 1 ]; then
+        # libssc 的运行期库依赖（openKylin 源里有，构建期 chroot 内补装；best effort）
+        chroot "$rootdir" apt-get update -qq 2>/dev/null || true
+        chroot "$rootdir" apt-get install -y --no-install-recommends \
+            libprotobuf-c1 libqmi-glib5 2>/dev/null || true
+        chroot "$rootdir" systemctl enable xiaomi-sheng-thp.service 2>/dev/null || true
+        echo "   xiaomi-sheng-thp 已安装并启用"
+    else
+        echo "  警告: 触摸用户态进程未安装，触摸将不可用" >&2
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # fix_wifi_firmware  — ath12k board-2.bin → board.bin 伪装
 #   参数: <rootdir> [firmware_subdir]
 #   默认 firmware_subdir: lib/firmware/ath12k/WCN7850/hw2.0

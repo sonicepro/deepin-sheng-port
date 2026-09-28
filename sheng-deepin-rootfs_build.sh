@@ -352,6 +352,7 @@ EOF
             > "$ROOTDIR/etc/systemd/system/qrtr-ns.service.d/10-skip-if-absent.conf"
     fi
     configure_touchscreen "$ROOTDIR"
+    install_touch_processor "$ROOTDIR"
     fix_wifi_firmware "$ROOTDIR"
 
     # The Deepin ISO ships the *builder's* NetworkManager connections (and their
