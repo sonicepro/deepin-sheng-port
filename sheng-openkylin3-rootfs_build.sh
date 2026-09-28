@@ -342,6 +342,15 @@ for MODE in "${BOOTMODES[@]}"; do
         chmod 0755 "$ROOTDIR"/usr/local/sbin/*.sh 2>/dev/null || true
     fi
 
+    # 5c. Audio. openKylin's udev coldplug does not autoload the WCD938x codec
+    #     core (snd_soc_wcd938x), so the SM8550 sound card ("sound"/snd-sc8280xp)
+    #     defers forever ("WCD Playback: codec dai not found") and the system
+    #     reports "no soundcards". The overlay ships
+    #     /etc/modules-load.d/sheng-audio.conf to load it at boot; also re-probe
+    #     the card once the ADSP audio protection domain is up to clear the
+    #     q6 APM boot race (same workaround as the Deepin build).
+    chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
+
     # 6. Users + hostname + locale + timezone.
     setup_users "$ROOTDIR" "$ROOT_PASS" "$USER_NAME" "$USER_PASS" \
         "sudo,audio,video,render,input,plugdev,netdev,network"

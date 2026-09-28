@@ -374,6 +374,13 @@ EOF
         chmod 0755 "$ROOTDIR"/usr/local/sbin/*.sh 2>/dev/null || true
     fi
 
+    # 6c. Audio. The WCD938x codec core (snd_soc_wcd938x) is not autoloaded by
+    #     udev coldplug, so the SM8550 sound card would defer forever and the
+    #     system report "no soundcards". The overlay ships
+    #     /etc/modules-load.d/sheng-audio.conf to load it; enable the post-ADSP
+    #     card re-probe to clear the q6 APM boot race (Deepin parity).
+    chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
+
     # 7. Users + hostname + locale + timezone.
     setup_users "$ROOTDIR" "$ROOT_PASS" "$USER_NAME" "$USER_PASS" \
         "sudo,audio,video,render,input,plugdev,netdev"
