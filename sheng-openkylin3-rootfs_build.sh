@@ -362,10 +362,33 @@ for MODE in "${BOOTMODES[@]}"; do
     #     core (snd_soc_wcd938x), so the SM8550 sound card ("sound"/snd-sc8280xp)
     #     defers forever ("WCD Playback: codec dai not found") and the system
     #     reports "no soundcards". The overlay ships
-    #     /etc/modules-load.d/sheng-audio.conf to load it at boot; also re-probe
-    #     the card once the ADSP audio protection domain is up to clear the
-    #     q6 APM boot race (same workaround as the Deepin build).
+    #     /etc/modules-load.d/sheng-audio.conf to load it at boot.
+    #     The codec core alone is not enough: if the card driver probes ~10s into
+    #     boot (before the ADSP audio subsystem is ready) it fails with -22 and
+    #     wedges the ADSP q6APM session, so the card never comes up on that boot
+    #     (this is the "audio works on some boots" flakiness). The overlay
+    #     blacklists snd_soc_sc8280xp (/etc/modprobe.d/sheng-audio.conf) and
+    #     sheng-audio-rebind.service loads it once the ADSP + SoundWire codec are
+    #     ready, avoiding the wedging early probe.
     chroot "$ROOTDIR" systemctl enable sheng-audio-rebind.service 2>/dev/null || true
+
+    # 5c-2. Silence the boot/login sounds. They are package files that play on
+    #     every login; divert them (so apt upgrades keep the silent versions) and
+    #     drop the .silent masters from the overlay in place.
+    #       - ukui-login-sound plays ukui-session-manager/startup.wav at login.
+    #       - speech-dispatcher's dummy output module (the only module present; the
+    #         xunfei/kylin_speech module binaries are missing) otherwise plays a
+    #         ~29s English demo (dummy-message.wav) on every login warm-up.
+    for _rel in \
+        usr/share/ukui/ukui-session-manager/startup.wav \
+        usr/share/sounds/speech-dispatcher/dummy-message.wav ; do
+        _m="$SCRIPT_DIR/system_files_openkylin/${_rel}.silent"
+        if [ -f "$ROOTDIR/$_rel" ] && [ -f "$_m" ]; then
+            chroot "$ROOTDIR" dpkg-divert --add --rename \
+                --divert "/$_rel.distrib" "/$_rel" 2>/dev/null || true
+            cp -a "$_m" "$ROOTDIR/$_rel"
+        fi
+    done
 
     # Suspend state: sheng/SM8550's "deep" suspend is unreliable (self-wakes a few
     # seconds in, or fails to resume, so a power-key suspend is hard to wake from).

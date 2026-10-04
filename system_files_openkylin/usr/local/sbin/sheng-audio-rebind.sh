@@ -1,38 +1,53 @@
 #!/bin/bash
-# SM8550 (sheng) audio bring-up workaround.
+# SM8550 (sheng) audio bring-up for openKylin.
 #
-# On early boot the snd-sc8280xp card probes BEFORE the ADSP audio protection
-# domain is ready, producing "qcom-apm gprsvc: CMD timeout for [...] opcode"
-# and leaving no working playback. Once the ADSP is up, re-probe the sound card
-# so the q6 APM / lpass clock state is re-initialized (documented workaround).
+# The snd-sc8280xp machine driver (DT platform device "sound") normally
+# autoloads ~10 s into boot, BEFORE the ADSP audio subsystem is ready. The probe
+# then fails hard:
+#     q6apm-dai ...: Audio Start: Buffer Allocation failed rc = -22
+#     snd-sc8280xp sound: probe with driver snd-sc8280xp failed with error -22
+# which leaves the ADSP q6APM session wedged, so every later re-bind keeps
+# failing and the system ends up with "no soundcards". On other boots the probe
+# merely returns DEFER (the card binds a bit later) and audio works — that is
+# the "audio works on some boots, not others" flakiness.
 #
-# (Adapted from the Deepin build's sheng-audio-rebind.sh — identical hardware/
-#  kernel, identical race. openKylin additionally needs the codec module load
-#  and a forced probe when the card is still in the deferred state.)
+# Fix: blacklist the module (see /etc/modprobe.d/sheng-audio.conf) so it never
+# probes early, and load it HERE, once, after the ADSP is up and the SoundWire
+# codec has bound. This avoids the wedging early probe entirely; no unbind/bind
+# re-probe (that path was already risky and is no longer needed).
 set -u
 
-# Ensure the WCD938x codec core is loaded (it registers the codec DAIs); without
-# it the SM8550 sound card can never bind (openKylin's udev does not autoload it).
+# 1) The WCD938x codec core registers the codec DAIs the card needs; openKylin's
+#    udev does not autoload it (snd-soc-wcd938x-sdw comes in as a dependency).
 modprobe snd_soc_wcd938x 2>/dev/null || true
 
-# Wait for the ADSP remoteproc to reach "running".
-for _ in $(seq 1 90); do
-    if [ "$(cat /sys/class/remoteproc/remoteproc0/state 2>/dev/null)" = "running" ]; then
-        break
-    fi
+# 2) Wait for the ADSP remoteproc to reach "running".
+for _ in $(seq 1 120); do
+    [ "$(cat /sys/class/remoteproc/remoteproc0/state 2>/dev/null)" = running ] && break
     sleep 1
 done
-# Let the audio protection domain settle.
+
+# 3) Wait for the SoundWire codec to bind (card components depend on it).
+for _ in $(seq 1 60); do
+    [ -e /sys/bus/platform/devices/audio-codec/driver ] && break
+    sleep 1
+done
+
+# 4) Stay past the early-boot window the kernel would have probed in, then let
+#    the ADSP audio protection domain settle.
+while [ "$(cut -d. -f1 /proc/uptime)" -lt 20 ]; do sleep 1; done
 sleep 3
 
-drv=/sys/bus/platform/drivers/snd-sc8280xp
-if [ -e "$drv/sound" ]; then
-    # Card already bound: re-probe so the q6 APM / lpass clock state is
-    # re-initialized (the ADSP race leaves it wedged).
-    echo sound > "$drv/unbind" 2>/dev/null || true
+card_up() { grep -q Xiaomi /proc/asound/cards 2>/dev/null; }
+card_up && exit 0
+
+# 5) Load the machine driver (binds the DT "sound" device). Retry briefly in case
+#    the ADSP needs a little longer on this boot.
+for _ in $(seq 1 10); do
+    modprobe snd_soc_sc8280xp 2>/dev/null || true
     sleep 2
-    echo sound > "$drv/bind" 2>/dev/null || true
-else
-    # Card still deferred (codec registered late): force a probe now.
-    echo sound > "$drv/bind" 2>/dev/null || true
-fi
+    card_up && exit 0
+done
+
+echo "sheng-audio-rebind: soundcard still not up after retries" >&2
+exit 1
