@@ -26,6 +26,8 @@
 # env:  OPENKYLIN_IMG_URL=<url>   (REQUIRED — the openKylin 3.0 arm64 image)
 #       IMAGE_SIZE / UUID / ROOT_PASS / USER_PASS / USER_NAME / FIRMWARE_URL /
 #       MIPPS_DEB_URL  (optional overrides)
+#       REMOVE_AI=1    (optional — strip the Kylin AI stack from the extracted
+#                       image; keeps the desktop-critical AI client libs)
 #
 # Output (one per boot mode):
 #   openkylin_<ver>_<mode>_<ts>.img.gz   (Android-sparse ext4 rootfs, gzip)
@@ -52,6 +54,11 @@ USER_NAME="${USER_NAME:-luser}"
 SYSTEM_HOSTNAME="${SYSTEM_HOSTNAME:-sheng}"
 SYSTEM_LOCALE="${SYSTEM_LOCALE:-zh_CN.UTF-8}"
 SYSTEM_TIMEZONE="${SYSTEM_TIMEZONE:-Asia/Shanghai}"
+
+# 移除镜像里的 Kylin AI 栈（AI 助手/机器人、后端服务、推理引擎、约 1.3G 模型）。
+# 默认关闭；设 REMOVE_AI=1（或 workflow 的 remove_ai 输入）开启。桌面硬依赖的
+# AI 客户端库会保留，见 lib/rootfs-common.sh 的 remove_kylin_ai。
+REMOVE_AI="${REMOVE_AI:-0}"
 
 # --- Args --------------------------------------------------------------------
 validate_args 2 4 $# '<distro-variant> <kernel_version> [boot_mode] [flavour]'
@@ -285,6 +292,14 @@ for MODE in "${BOOTMODES[@]}"; do
         echo 'nameserver 8.8.8.8'
         echo 'nameserver 1.1.1.1'
     } > "$ROOTDIR/etc/resolv.conf"
+
+    # 3c. 可选：剥掉镜像自带的 Kylin AI 栈（AI 助手/机器人、后端服务、kytensor/
+    #     Triton 推理、引擎插件 + 1.3G 模型）。默认关；REMOVE_AI=1 开启。保留桌面
+    #     必需的 AI 客户端库，否则 UKUI 桌面会被级联卸载
+    #     （见 lib/rootfs-common.sh:remove_kylin_ai）。best-effort，失败不中断。
+    if is_true "$REMOVE_AI"; then
+        remove_kylin_ai "$ROOTDIR" || echo "WARN: AI 移除步骤返回非零，继续构建" >&2
+    fi
 
     # 4. Inject the sheng kernel .deb (placed in cwd by the workflow)
     echo "==> Injecting sheng kernel .deb..."

@@ -489,6 +489,82 @@ capture_package_list() {
 }
 
 # ---------------------------------------------------------------------------
+# is_true  — 解析布尔型开关（1/true/yes/on/y，大小写不敏感）
+#   参数: <value>   返回: 0=真, 1=假
+# ---------------------------------------------------------------------------
+is_true() {
+    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on|y) return 0 ;;
+        *)               return 1 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# remove_kylin_ai  — 移除目标 rootfs 里的 openKylin Kylin AI 栈
+#   参数: <rootdir>（需已 setup_chroot_mounts，可在 chroot 内跑 apt）
+#   -----------------------------------------------------------------------
+#   openKylin 镜像自带整套 AI：AI 助手/机器人（kylin-aiassistant / kylin-bot）、
+#   后端服务（kyai-data-management / knowledge-base / document-qa / vector-engine
+#   / kylin-ai-runtime）、推理引擎（kytensor + Triton）、厂商引擎插件
+#   （libkylin-{baidu,xunfei,freetrial,custom,deepseek,qwen}-*）、本地引擎/模型
+#   （libkylin-ondevice-* / kylin-*-model，约 1.3G）。此函数在构建期清掉。
+#
+#   ★ 桌面（UKUI 搜索/开始菜单/文件管理器）硬依赖两个 AI 客户端库
+#     libkyai-data-management-client 与 libkysdk-ai-common；一并删除会让 apt
+#     级联卸载整个 UKUI 桌面（ukui-panel/menu/peony/ukui-search…），故保留。
+#   ★ libonnx1t64 / libonnxruntime 也保留（图片查看器 kylin-photo-viewer 依赖）。
+#
+#   best-effort：失败不中断构建，只在日志里打印剩余包。
+# ---------------------------------------------------------------------------
+remove_kylin_ai() {
+    local rootdir="$1"
+    echo "==> 移除 Kylin AI 栈（保留桌面必需的客户端库）..."
+    chroot "$rootdir" /bin/bash -s <<'SHENG_REMOVE_AI'
+set -u
+export LC_ALL=C DEBIAN_FRONTEND=noninteractive
+
+# 桌面必需的 AI 客户端库：删了会级联卸载整个 UKUI 桌面
+KEEP='^(libkyai-data-management-client|libkysdk-ai-common)$'
+# Kylin AI 全家桶的包名前缀（覆盖 50+ 个包，含厂商引擎插件与云模型）
+PAT='^(kylin-ai|kyai|kytensor|kylin-bot|libkyai|libkylin-ai|libkylin-ondevice|libkylin-coreai|libkysdk-ai|libkysdk-coreai|libkysdk-genai|libkysdk-vector|ai-kylin|onnxruntime|kylin-.*-model|libkylin-(baidu|xunfei|freetrial|custom|deepseek|qwen)|llm-backend)'
+
+PKGS="$(dpkg -l 2>/dev/null | awk '$1=="ii"{print $2}' | sed 's/:.*$//' \
+        | grep -E "$PAT" | grep -vE "$KEEP" | sort -u | tr '\n' ' ')"
+if [ -z "${PKGS// /}" ]; then
+    echo "    （未发现 Kylin AI 包，跳过）"
+    exit 0
+fi
+echo "    待卸载：${PKGS}"
+
+# 镜像可能没带 apt 索引；空索引时 apt 可能报错，先补一份（remove 一般不联网）
+ls /var/lib/apt/lists/*Packages* >/dev/null 2>&1 || apt-get update -qq 2>/dev/null || true
+
+# 让 postrm 里的 invoke-rc.d / systemctl 直接跳过（chroot 内没有 systemd）
+printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d 2>/dev/null || true
+chmod 0755 /usr/sbin/policy-rc.d 2>/dev/null || true
+
+# shellcheck disable=SC2086
+if ! apt-get -y -o Dpkg::Use-Pty=0 remove --purge $PKGS; then
+    echo "    警告：apt purge 返回非零，部分包可能未删除"
+fi
+
+rm -f /usr/sbin/policy-rc.d
+
+# 清掉 dpkg 删不掉的内容 / 自启 / 残留
+rm -rf /usr/share/kylin-ai /opt/tritonserver
+rm -f  /etc/xdg/autostart/kylin-ai-runtime.desktop \
+       /etc/xdg/autostart/kylin-bot-autostart.desktop \
+       /usr/share/applications/kylin-aiassistant.desktop \
+       /usr/share/applications/voice-assistant.desktop
+systemctl disable kytensor.service 2>/dev/null || true
+rm -f /etc/systemd/system/default.target.wants/kytensor.service 2>/dev/null || true
+
+LEFT="$(dpkg -l 2>/dev/null | awk '$1=="ii"{print $2}' | grep -E "$PAT" | grep -vE "$KEEP" | tr '\n' ' ')"
+echo "    剩余 Kylin AI 包：${LEFT:-(无)}"
+SHENG_REMOVE_AI
+}
+
+# ---------------------------------------------------------------------------
 # download_firmware  -- 下载并提取 linux-firmware-sheng
 #   参数: <output_dir> (默认: firmware-xiaomi-sheng/usr/lib)
 # ---------------------------------------------------------------------------

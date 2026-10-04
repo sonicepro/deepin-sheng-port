@@ -40,6 +40,10 @@ on:
         description: '版本号（仅用于产物命名）'
         required: false
         default: '3.0'
+      remove_ai:
+        description: '移除 Kylin AI 栈（AI 助手/模型/推理引擎；保留桌面必需的客户端库）'
+        type: boolean
+        default: true
       skip_release:
         description: '跳过创建 GitHub Release'
         type: boolean
@@ -102,6 +106,7 @@ jobs:
         env:
           OPENKYLIN_IMG_URL: ${{ inputs.openkylin_img_url }}
           OPENKYLIN_VERSION: ${{ inputs.openkylin_version }}
+          REMOVE_AI: ${{ inputs.remove_ai }}
           FIRMWARE_URL: https://github.com/${{ github.repository }}/releases/download/kernel-bundle-${{ inputs.kernel_version }}/sheng-firmware-master.tar.gz
           MIPPS_DEB_URL: https://github.com/${{ github.repository }}/releases/download/kernel-bundle-${{ inputs.kernel_version }}/xiaomi-mipps-auth.deb
         run: |
