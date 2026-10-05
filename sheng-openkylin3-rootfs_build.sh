@@ -32,6 +32,9 @@
 #                       (ll-cli/ll-box + its Qt5/repo/libyaml-cpp fixes); default: on)
 #       AUTOROTATE_ENV=0 (optional — skip the auto-rotate setup: pd-mapper +
 #                       adsprpcd-sensorspd + the sheng-autorotate daemon); default: on
+#       BRIGHTNESS_FIX_ENV=0 (optional — skip patching ukui-settings-daemon so the
+#                       compositor gamma-manager owns screen brightness (no
+#                       reset-to-max on rotation / boot)); default: on
 #
 # Output (one per boot mode):
 #   openkylin_<ver>_<mode>_<ts>.img.gz   (Android-sparse ext4 rootfs, gzip)
@@ -538,6 +541,107 @@ if [ -z "$IMAGE_SIZE" ]; then
 fi
 echo "==> Target image size: ${IMAGE_SIZE}"
 
+# --- 指纹 (Xiaomi Pad 6S Pro 电源键指纹 / FPC1553) --------------------------
+# 目标：刷机后指纹开箱即用 —— 控制中心/锁屏能录入、**按住即解锁**、**休眠不被指纹打断**。
+# 这条链既不是 openKylin 自带、也不是上游 Debian 的现成方案，是本仓库在真机上逐条
+# 打通的（详见 DEVELOPMENT.md 的“指纹”一节）：
+#   1) 上游 ianchb/xiaomi-sheng-fingerprint 的**纯用户态** QTEE/Mink 栈
+#      （qteesupplicant + libfpc1553-qtee.so + 一颗含 fpc1553 驱动的私有 libfprint）
+#      —— 内核只需 `fpc1553` 驱动 + /dev/tee0。
+#   2) openKylin 图形登录/锁屏**只认 Kylin `biometric-auth`**（不走 fprintd），而它的
+#      多设备驱动发现是 USB 的、看不到非 USB 的 FPC1553。做法：把镜像里
+#      `biometric-driver-community-multidevice` 的 goodixmoc.so 复制成 fpc1553.so 并把
+#      .so 里烤死的驱动名 goodixmoc(@0x8430) 改成 fpc1553，再让驱动用兄弟目录里的私有
+#      libfprint（含 fpc1553 驱动）——即服务 drop-in 的 FP_FPC1553=1 + LD_LIBRARY_PATH。
+#   3) 两个自研补丁（预编译二进制在 fingerprint_payload/）：
+#      - libfprint-2.so.2.0.0：改 fpc1553 驱动 wait_for_finger_lift，验证/识别匹配到即
+#        上报（不再等抬手）但保留芯片 deep-sleep → **按住即解锁**。
+#      - fpc1553.ko.zst：去掉内核模块里无条件的 irq_set_irq_wake（指纹 IRQ 不再是唤醒
+#        源）→ **点休眠不再 1.8s 自唤醒**。（vermagic 须匹配注入的内核！）
+# ⚠ 升级内核要重编 fpc1553.ko；升级 xiaomi-sheng-fingerprint 包会覆盖私有 libfprint。
+FINGERPRINT_ENV="${FINGERPRINT_ENV:-1}"     # 0 = 跳过整节
+FINGERPRINT_DEB_URL="${FINGERPRINT_DEB_URL:-https://github.com/ianchb/xiaomi-sheng-fingerprint/releases/download/v0.1.4/xiaomi-sheng-fingerprint_0.1.4_arm64.deb}"
+
+install_fingerprint() {
+    local rootdir="$1"
+    echo "==> 安装指纹 (FPC1553 / 电源键指纹)..."
+
+    # (1) 用户态栈：上游 deb 用 fsys-tarfile 解开塞进 rootfs（避开 fprintd/libgusb
+    #     依赖 —— Kylin 原生路径用不上 fprintd，无需 chroot dpkg）。
+    local tmpd; tmpd="$(mktemp -d)"
+    if wget -nv -O "$tmpd/xsf.deb" "$FINGERPRINT_DEB_URL"; then
+        dpkg-deb --fsys-tarfile "$tmpd/xsf.deb" \
+            | tar -x --keep-directory-symlink -C "$rootdir/"
+        echo "   装上 qteesupplicant + 后端 + 私有 libfprint + qtee-listeners + systemd 单元"
+    else
+        echo "   警告: xiaomi-sheng-fingerprint deb 下载失败，指纹跳过（检查 github.com 是否可达）" >&2
+        rm -rf "$tmpd"; return 0
+    fi
+    rm -rf "$tmpd"
+
+    # (2) 启用 QTEE supplicant + SFS 配置服务。
+    chroot "$rootdir" systemctl enable sfsconfig.service qteesupplicant.service 2>/dev/null || true
+
+    # (3) Kylin 多设备驱动接线：goodixmoc.so → fpc1553.so（改烤死的驱动名）。
+    local src="$rootdir/usr/lib/biometric-authentication/drivers/goodixmoc.so"
+    local dst="$rootdir/usr/lib/biometric-authentication/drivers/fpc1553.so"
+    if [ -f "$src" ]; then
+        cp -a "$src" "$dst"
+        if python3 - "$dst" <<'PYEOF'
+import sys
+p = sys.argv[1]
+d = bytearray(open(p, 'rb').read())
+if d[0x8430:0x8439] == b'goodixmoc':
+    d[0x8430:0x8438] = b'fpc1553\x00'
+    open(p, 'wb').write(d)
+    sys.exit(0)
+sys.exit(1)
+PYEOF
+        then
+            echo "   fpc1553.so 驱动名已打（goodixmoc→fpc1553 @0x8430）"
+        else
+            echo "   警告: goodixmoc.so 偏移 0x8430 不是 'goodixmoc'（镜像版本变了吗？）——驱动名未打，指纹可能不生效" >&2
+        fi
+        local conf="$rootdir/etc/biometric-auth/biometric-drivers.conf"
+        if [ -f "$conf" ] && ! grep -q '^\[fpc1553\]' "$conf"; then
+            printf '\n' >> "$conf"
+            cat "$SCRIPT_DIR/fingerprint_payload/drivers.conf.fpc1553" >> "$conf"
+        fi
+        install -Dm644 "$SCRIPT_DIR/fingerprint_payload/10-fpc1553.conf" \
+            "$rootdir/etc/systemd/system/biometric-authentication.service.d/10-fpc1553.conf"
+    else
+        echo "   警告: 未找到 goodixmoc.so（镜像缺 biometric-driver-community-multidevice？）——指纹跳过" >&2
+        return 0
+    fi
+
+    # (4) 私有 libfprint（按住即解锁版）——覆盖 deb 里的同名文件。
+    if [ -f "$SCRIPT_DIR/fingerprint_payload/libfprint-2.so.2.0.0" ]; then
+        install -Dm755 "$SCRIPT_DIR/fingerprint_payload/libfprint-2.so.2.0.0" \
+            "$rootdir/usr/lib/xiaomi-sheng-fingerprint/libfprint-2.so.2.0.0"
+        echo "   私有 libfprint 覆盖为『按住即解锁』版"
+    fi
+
+    # (5) 休眠修复：覆盖内核模块 fpc1553.ko（去掉 IRQ 唤醒源）。
+    local kver; kver="$(detect_kernel_module_dir "$rootdir")"
+    if [ -n "$kver" ] && [ -f "$SCRIPT_DIR/fingerprint_payload/fpc1553.ko.zst" ]; then
+        local mdst="$rootdir/lib/modules/$kver/kernel/drivers/misc/fpc1553.ko.zst"
+        if [ ! -d "$(dirname "$mdst")" ]; then
+            mdst="$rootdir/usr/lib/modules/$kver/kernel/drivers/misc/fpc1553.ko.zst"
+        fi
+        if [ -d "$(dirname "$mdst")" ]; then
+            install -Dm644 "$SCRIPT_DIR/fingerprint_payload/fpc1553.ko.zst" "$mdst"
+            chroot "$rootdir" depmod -a "$kver" 2>/dev/null || true
+            echo "   fpc1553.ko 覆盖（休眠修复），kver=$kver"
+        else
+            echo "   警告: 未找到 fpc1553.ko 的目标目录（kver=$kver）——休眠修复未应用" >&2
+        fi
+    else
+        echo "   警告: 未定位到内核模块目录，跳过 fpc1553.ko 覆盖" >&2
+    fi
+
+    echo "   指纹安装完成（控制中心/锁屏可用；只保留 1 个模板最快）"
+}
+
 # --- Build loop over boot modes ---------------------------------------------
 mapfile -t BOOTMODES < <(parse_boot_modes "$TARGET_MODE") || exit 1
 MODES_LEFT=${#BOOTMODES[@]}
@@ -694,6 +798,13 @@ for MODE in "${BOOTMODES[@]}"; do
         install_kmre "$ROOTDIR" || echo "WARN: KMRE 安装步骤返回非零，继续构建" >&2
     fi
 
+    # 5f. 指纹 (FPC1553 / 电源键指纹)。见 install_fingerprint 顶部注释。
+    #     依赖 4（内核 fpc1553 模块已注入，供覆盖 fpc1553.ko）与 5b（覆盖层）之后。
+    #     FINGERPRINT_ENV=0 可跳过。best effort，失败不中断整个构建。
+    if is_true "$FINGERPRINT_ENV"; then
+        install_fingerprint "$ROOTDIR" || echo "WARN: 指纹安装步骤返回非零，继续构建" >&2
+    fi
+
     # 6. Users + hostname + locale + timezone.
     setup_users "$ROOTDIR" "$ROOT_PASS" "$USER_NAME" "$USER_PASS" \
         "sudo,audio,video,render,input,plugdev,netdev,network"
@@ -730,6 +841,19 @@ for MODE in "${BOOTMODES[@]}"; do
 </fontconfig>
 FONTCONF
     chown -R "${USER_NAME}:${USER_NAME}" "$_userfc"
+
+    # 6c. 亮度持久化：让合成器 gamma-manager 接管屏幕亮度，避免转屏/开机把亮度
+    #     重置成最亮。根因：openKylin 的 ukui-settings-daemon 只按"是否存在
+    #     /sys/class/backlight/*/brightness 节点"判断硬件背光可调，于是把唯一内屏
+    #     当笔记本内屏，每次输出重配置（转屏）都把合成器亮度拉满到 100；而本平板
+    #     upm 实际调不了该节点（CanSetBrightness=false）。补丁让
+    #     upmSupportAdjustBrightness() 返回 false（等价源码补丁见
+    #     docs/patches/ukui-settings-daemon-upmSupportAdjustBrightness.patch）。
+    #     BRIGHTNESS_FIX_ENV=0 可跳过。
+    if is_true "${BRIGHTNESS_FIX_ENV:-1}"; then
+        bash "$SCRIPT_DIR/tools/sheng-usd-brightness-fix.sh" "$ROOTDIR" \
+            || echo "WARN: 亮度修复步骤返回非零，继续构建" >&2
+    fi
 
     echo "${SYSTEM_HOSTNAME}" > "$ROOTDIR/etc/hostname"
     printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n' "$SYSTEM_HOSTNAME" > "$ROOTDIR/etc/hosts"

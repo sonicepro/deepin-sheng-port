@@ -1,0 +1,4 @@
+[fpc1553]
+Enable=true
+Driver=/usr/lib/biometric-authentication/drivers/fpc1553.so
+AESKey=/etc/biometric-auth/key/community-multidevice-aes.key

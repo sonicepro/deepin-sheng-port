@@ -125,6 +125,50 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 > 轴映射（真机标定）：屏法线 = 传感器 **Z**；正常横屏时 in-plane 重力 = **+X** →
 > `+X→normal`、`+Y→left`、`-X→upside-down`、`-Y→right`。
 
+### openKylin 3.0：亮度持久化（转屏/重启不回到最亮）
+
+构建步骤 **6c（开关 `BRIGHTNESS_FIX_ENV`，默认开）** 给 `ukui-settings-daemon` 打补丁，
+让"转屏/重启后屏幕亮度回到最亮"消失。
+
+- **亮度控制是谁**：快捷操作条（`ukui-sidebar` 的 `libbrightness-shortcut.so`）、设置→显示器
+  （`ukui-control-center` 的 `libdisplay.so`）、托盘都走会话 D-Bus `org.ukui.SettingsDaemon`
+  对象 `/GlobalBrightness` 的 `setPrimaryBrightness`（即 `ukui-settings-daemon` 的 gamma-manager）
+  → 下发合成器软件亮度 `com.kylin.Wlcom.Output.SetBrightness`。用户值存
+  `/etc/ukui/usd/globalconf.ini` 的 `[color] <output>=<0..100>`（映射 `合成器值 = 30 + 值×0.7`）。
+- **根因**：`UsdBaseClass::upmSupportAdjustBrightness()` 只判断
+  `/sys/class/backlight/*/brightness` 是否存在 → 本平板有 `ktz8866-backlight` → 返回 true →
+  gamma-manager 把**唯一内屏**当"笔记本内屏"，在 `GmHelper::updateWlcomOutputInfo()` 里
+  `targetBrightness=100`，**每次输出重配置（转屏）和会话启动**都拉满。而 upm 其实调不了该节点
+  （`org.ukui.powermanagement.CanSetBrightness=false`）。实测：冻结 `ukui-settings-daemon` 后用
+  `kscreen-doctor` 转屏，合成器亮度**保持不变** → 重置 100% 来自该 daemon。
+- **修法**：让 `upmSupportAdjustBrightness()` 在 upm 调不了背光时返回 false → 改由 gamma-manager
+  管亮度（其值会持久化并按 config 恢复）。源码补丁见
+  `docs/patches/ukui-settings-daemon-upmSupportAdjustBrightness.patch`。
+- **落地方式**：openKylin 仓库版本错位（`libxrandr-dev` 1.5.2 依赖 `libxrandr2` 1.5.2，但设备装的是
+  1.5.4）导致**在设备上源码编译 ukui-settings-daemon 失败**，故 `tools/sheng-usd-brightness-fix.sh`
+  直接对**已编译**的该函数打机器码补丁（`mov w0,#0; ret`）：**daemon 主程序
+  `/usr/bin/ukui-settings-daemon` + 每个导出该符号的插件 `.so`**（各插件静态链了
+  `common/usd_base_class.cpp`，且该符号会被 interpose，所以主程序里那份往往才是实际被调用的）。
+  脚本用 `nm -DC` 找符号、`readelf -SW` 把 vaddr 换算成文件偏移，**与构建机架构无关**（只读 arm64
+  ELF 字节，x86 构建机也能跑）。⚠️ **在对这些文件写入前必须先停掉 `ukui-settings-daemon`**，
+  否则会因 mmap 重取页而 SIGBUS（实测 core dump）。
+- 验证：`setPrimaryBrightness 30` → 合成器 `brightness=51`；转屏 → 仍 51；重启 sd → 仍 51（不再 100）。
+
+### openKylin 3.0：指纹（FPC1553 / 电源键指纹）
+
+构建步骤 **5f（开关 `FINGERPRINT_ENV`，默认开）** 把**指纹**做成开箱即用：控制中心/锁屏能录入、**按住即解锁**、**点休眠不被指纹打断**。这条链既不是 openKylin 自带、也不是上游 Debian 的现成方案 —— openKylin 的图形登录/锁屏**只认 Kylin `biometric-auth`**（不走 fprintd），而它的多设备驱动发现是 **USB** 的、看不到非 USB 的 FPC1553。本仓库在真机上逐条打通：
+
+- **内核侧**：只需 `fpc1553` 驱动 + `/dev/tee0`；真正干活的是签名 TA `fpcsheng`（配 QTEE 5.2 / `qcomtee`）。
+- **用户态栈**：上游 `ianchb/xiaomi-sheng-fingerprint`（纯用户态）—— `qteesupplicant`（MinkIPC/Mink 运行时）+ `libfpc1553-qtee.so`（FPC 协议后端）+ 一颗**含 fpc1553 驱动的私有 libfprint** + qtee-listeners + systemd 单元 + udev 规则。构建从 GitHub release 取 `xiaomi-sheng-fingerprint_0.1.4_arm64.deb`，用 `dpkg-deb --fsys-tarfile` 解开塞入（**不装 fprintd** —— Kylin 原生路径用不上）。
+- **Kylin 驱动接线**：Kylin `biometric-auth` 的多设备驱动（`goodixmoc.so` 等）其实是同一个 demo 模板，按**烤在 .so 里的驱动名**过滤 libfprint 设备。做法：`cp goodixmoc.so fpc1553.so` 并把偏移 `0x8430` 的 `goodixmoc` 改成 `fpc1553`；`biometric-drivers.conf` 追加 `[fpc1553]`；服务 drop-in `FP_FPC1553=1` + `LD_LIBRARY_PATH=/usr/lib/xiaomi-sheng-fingerprint`（让驱动用**兄弟目录那颗含 fpc1553 的私有 libfprint**）。
+- **两个自研补丁**（预编译二进制在 `fingerprint_payload/`，构建时覆盖）：
+  1. `libfprint-2.so.2.0.0` —— 改 fpc1553 驱动 `wait_for_finger_lift`：验证/识别**匹配到即上报**（不再等手指抬起）但**保留芯片 deep-sleep** → **按住即解锁**（原版必须松手才结算）。
+  2. `fpc1553.ko.zst` —— 去掉内核模块里**无条件**的 `irq_set_irq_wake`（指纹 IRQ 不再是唤醒源）→ **点休眠不再 ~1.8 秒自唤醒**。
+
+> ⚠️ **可维护性**：升级**内核**要重编 `fpc1553.ko`（vermagic 须精确匹配注入内核）；升级 `xiaomi-sheng-fingerprint` **包**会覆盖私有 `libfprint`。
+> ⚠️ **别删单个指纹模板**：`biometric-auth-client clean -i <单个>` 会让 Kylin 库与 TA 库失步 → 之后验证一直失败且**还原文件也救不回**。要改就"清空全部 + 重录一个"（`clean -i -1`）。
+> 💡 **速度**：比对耗时**正比模板数** —— 只保留 **1 个**（~1s；2 个约 3s）。设备 ID 用 `biometric-auth-client get-device-list` 查。
+
 ### 只构建 boot 镜像（轻量，不重建 rootfs）
 
 只想要/重做 `boot_sheng_*.img`（比如已有 rootfs）时，跑 **Build boot images** workflow
@@ -147,6 +191,7 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 | **缺 GPU 固件**（`a740_sqe.fw`/`gmu_gen70200.bin`）→ **黑屏** | 固件 `.deb` 的 blob 从 `/usr/lib/` **搬到 `/lib/firmware/`**，再叠加完整固件仓库 |
 | **WiFi（ath12k WCN7850）** 起不来 | `fix_wifi_firmware`：`board-2.bin` → `board.bin` 伪装 |
 | **openKylin3：自动转屏不工作**（`ssccli` 报 `SSC QMI Service not found`；屏幕不跟随旋转） | 缺 `protection-domain-mapper`：装并 enable `pd-mapper` + `chmod 0755 /usr/bin/adsprpcd` + enable `adsprpcd-sensorspd`（挂 multi-user.target），并用 `sheng-autorotate` 直连 `ssccli` 调 `set_rotation`；见「openKylin 3.0：自动转屏」 |
+| **openKylin3：转屏 / 重启把屏幕亮度重置成最亮** | `ukui-settings-daemon` 只按 `/sys/class/backlight/*/brightness` 节点是否存在就认定“硬件背光可调”，把唯一内屏当笔记本内屏，**每次输出重配置（转屏）都把合成器亮度拉满到 100**；本平板 upm 其实调不了该节点（`CanSetBrightness=false`）。打补丁让 `UsdBaseClass::upmSupportAdjustBrightness()` 返回 false（`tools/sheng-usd-brightness-fix.sh`，步骤 6c；等价源码补丁见 `docs/patches/`）→ 改由合成器 gamma-manager 管亮度（值存 `/etc/ukui/usd/globalconf.ini [color]`），转屏/开机即保留，且无闪屏。见「openKylin 3.0：亮度持久化」 |
 | **`qrtr-ns.service` 失败** | 装 `qrtr` 包 + `ConditionPathExists` 兜底（没有就跳过） |
 | **`getty@ttyMSM0` 失败** | 去掉（内核命令行 `con_enabled=0`，该串口不存在） |
 | **没声音**（WirePlumber 走 ACP 不走 UCM → Dummy 输出） | 打补丁 `use-acp=false` + `sheng-audio-rebind`（ADSP 竞态后重探）+ `sheng-audio-ucm`（应用 UCM + 开 6 个 cs35l43 功放） |
@@ -159,6 +204,8 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 | **DDE 系统更新下载不了**（暂缓） | DDE「系统更新」的**下载步骤只会走** `deepin-immutable-ctl upgrade --download-only`（ostree 不可变系统专用），本机是摊平 ext4、无 `/sysroot/ostree/repo`、无 ostree 远端 → 必然失败；删 ctl 二进制只会把它变成 `fork/exec … no such file`。**保留** ISO 的 `/etc/deepin-immutable-ctl` 与 `/usr/sbin/deepin-immutable-ctl`（与官方一致）；要真正可用需把端口改造成 ostree 部署，待后续 |
 | **120W 快充不生效** | 装 `xiaomi-mipps-auth`（内核 `pmic-glink` 节点已在） |
 | **待机秒醒 / 屏幕自动亮**（插充电时尤甚） | sheng（SM8550）的 `deep` 挂起会在几秒内自唤醒（充电时几乎必现）→ `system_files` 加 `sheng-mem-sleep.service`：开机把默认睡眠态钉成 **`s2idle`**，`deep` 不再启用 |
+| **openKylin3：指纹（控制中心/锁屏）看不到设备 / 必须松手才解锁** | openKylin 图形登录/锁屏只认 Kylin `biometric-auth`（USB 发现看不到非 USB 的 FPC1553）。构建：`goodixmoc.so`→`fpc1553.so`（改烤死的驱动名 @0x8430）+ 追加 `[fpc1553]` 段 + 服务 drop-in（FP_FPC1553=1 + LD_LIBRARY_PATH）+ 覆盖"匹配即上报"的私有 `libfprint`（步骤 5f，见「openKylin 3.0：指纹」） |
+| **openKylin3：点休眠 ~1.8 秒自动唤醒** | `fpc1553` 内核模块在 `fpc1553_prepare` 里**无条件** `irq_set_irq_wake(1)` → 指纹 IRQ 成唤醒源（`/sys/kernel/irq/N/wakeup` 只读，用户态关不掉）。构建覆盖**去掉该调用**的 `fpc1553.ko`（步骤 5f） |
 | **刷完分区没撑满** | fstab 加 `x-systemd.growfs`（首启自动扩容） |
 | **要做单次解压**（GitHub zip + 7z 双层） | 直接输出 sparse `.img`，Release 走 `.img.gz` 分卷 |
 | **屏幕键盘难用 / 皮肤·尺寸不对** | dconf 系统默认（`system_files/etc/dconf/db/local.d/00-sheng-onboard`）：onboard 停靠底部 + **Blackboard 皮肤 / Small 布局** + 自动弹出；`window-handles=''` 防多指滑动误改大小。**两个前提缺一不可**：(1) 必须 `dconf update` 编译（需 `dconf-cli`，构建里装）——否则 `/etc/dconf/db/local` 根本不生成、默认静默失效（gsettings 一直报 `unable to open /etc/dconf/db/local`）；(2) `use-system-defaults=true`——onboard 该键（schema 默认 true，含义“先从系统默认读配置、首启后自动重置”）设成 false 就永不读系统默认、转而用 onboard 自带默认，皮肤尺寸全不对 |
