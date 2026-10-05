@@ -1,0 +1,16 @@
+[Unit]
+Description=Sheng auto-brightness (SSC ambient light -> UKUI screen brightness)
+Documentation=https://github.com/sonicepro/deepin-sheng-port
+# graphical-session.target is the proper dependency; default.target is added
+# too so the daemon comes up even if ukui-session does not reach the former.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sheng-autobrightness
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target graphical-session.target

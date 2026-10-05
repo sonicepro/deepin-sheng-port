@@ -32,6 +32,9 @@
 #                       (ll-cli/ll-box + its Qt5/repo/libyaml-cpp fixes); default: on)
 #       AUTOROTATE_ENV=0 (optional — skip the auto-rotate setup: pd-mapper +
 #                       adsprpcd-sensorspd + the sheng-autorotate daemon); default: on
+#       AUTOBRIGHTNESS_ENV=0 (optional — skip the auto-brightness setup: the
+#                       sheng-autobrightness daemon, SSC ambient light -> UKUI
+#                       screen brightness); default: on
 #       BRIGHTNESS_FIX_ENV=0 (optional — skip patching ukui-settings-daemon so the
 #                       compositor gamma-manager owns screen brightness (no
 #                       reset-to-max on rotation / boot)); default: on
@@ -509,6 +512,47 @@ install_autorotate() {
     echo "   自动转屏配置完成"
 }
 
+# --- 自动亮度 (auto-brightness: ADSP SSC 环境光 -> UKUI 亮度) --------------------
+# 目标：刷机后自动亮度开箱即用。链条与根因（真机逐一验证）：
+#   1) 光感 = ADSP SSC stk3bcx，走 libssc（`ssccli --sensor light` 输出
+#      "Light sensor measurement: N Lux"）。依赖 install_touch_processor（落地
+#      libssc/ssccli）与 install_autorotate（pd-mapper + adsprpcd-sensorspd 把
+#      传感器 PD 带起来，SSC 才注册 QMI service）——须在其后调用。
+#   2) 亮度 = 会话 D-Bus org.ukui.SettingsDaemon /GlobalBrightness 的
+#      org.ukui.SettingsDaemon.Brightness.setPrimaryBrightness(u)（与手动亮度
+#      滑块同一条路，走合成器 gamma）。
+#   3) 开关 = 控制中心「显示」页写的 gsettings 键
+#      org.ukui.SettingsDaemon.plugins.auto-brightness auto-brightness。
+#   4) 不用系统自带的 auto-brightness 插件：libauto-brightness.so 能读光感，但其
+#      adjustBrightnessWithLux 通过内部 BrightThread 施加亮度，在本机
+#      Wayland/kylin-wlcom 上无效（真机实测：开灯/关灯、连它自带的 debug-lux 扫值
+#      亮度都不变）。故改用本仓库自带的 sheng-autobrightness 守护进程。
+#   AUTOBRIGHTNESS_ENV=0 可跳过。
+AUTOBRIGHTNESS_ENV="${AUTOBRIGHTNESS_ENV:-1}"
+
+install_autobrightness() {
+    local rootdir="$1" uname="$2"
+    echo "==> 配置自动亮度 (SSC 环境光 -> openKylin 亮度)..."
+
+    # (1) 落地守护进程 + 用户级服务（显式安装保证权限位；overlay 的 cp -a 已拷贝过）。
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/bin/sheng-autobrightness" \
+        "$rootdir/usr/local/bin/sheng-autobrightness"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/systemd/user/sheng-autobrightness.service" \
+        "$rootdir/etc/systemd/user/sheng-autobrightness.service"
+
+    # (2) 建用户级 enable 软链（构建期没有用户 session，systemctl --user enable 用不了）。
+    local udir="$rootdir/home/${uname}/.config/systemd/user"
+    local target
+    for target in default.target graphical-session.target; do
+        mkdir -p "$udir/${target}.wants"
+        ln -sf "/etc/systemd/user/sheng-autobrightness.service" \
+            "$udir/${target}.wants/sheng-autobrightness.service"
+    done
+    chown -R "${uname}:${uname}" "$rootdir/home/${uname}/.config" 2>/dev/null || true
+
+    echo "   自动亮度配置完成"
+}
+
 # --- Extract once up front (so we can size the image to fit) -----------------
 echo "==> Extracting openKylin userland..."
 STAGE="$(mktemp -d)"
@@ -852,6 +896,13 @@ for MODE in "${BOOTMODES[@]}"; do
     #     见 install_autorotate 顶部注释。AUTOROTATE_ENV=0 可跳过。
     if is_true "$AUTOROTATE_ENV"; then
         install_autorotate "$ROOTDIR" "$USER_NAME" || echo "WARN: 自动转屏步骤返回非零，继续构建" >&2
+    fi
+
+    # 6a-2. 自动亮度（SSC 环境光 -> openKylin 亮度）。与自动转屏同源（共用 pd-mapper
+    #       + adsprpcd-sensorspd 把传感器 PD 带起来），须在 install_autorotate 之后、
+    #       setup_users 之后。见 install_autobrightness 顶部注释。AUTOBRIGHTNESS_ENV=0 可跳过。
+    if is_true "$AUTOBRIGHTNESS_ENV"; then
+        install_autobrightness "$ROOTDIR" "$USER_NAME" || echo "WARN: 自动亮度步骤返回非零，继续构建" >&2
     fi
 
     # 6b. Fontconfig: pin the generic families to Noto so linglong/DTK apps don't

@@ -125,6 +125,36 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 > 轴映射（真机标定）：屏法线 = 传感器 **Z**；正常横屏时 in-plane 重力 = **+X** →
 > `+X→normal`、`+Y→left`、`-X→upside-down`、`-Y→right`。
 
+### openKylin 3.0：自动亮度（ADSP SSC 环境光 → UKUI 亮度）
+
+同一构建循环里有 **`install_autobrightness`（步骤 6a-2；开关 `AUTOBRIGHTNESS_ENV`，默认开）**，
+让平板**自动亮度**开箱即用。链条与根因（真机逐一验证）：
+
+- **光感 = ADSP SSC 环境光**（`stk3bcx`），走 **libssc**：`ssccli --sensor light` 输出
+  `Light sensor measurement: N Lux`（本机固件的光感**可用**；与加速度计不同，没有导致
+  iio-sensor-proxy 崩的 `measurement_id` 缺失问题）。
+- **亮度 = 会话 D-Bus** `org.ukui.SettingsDaemon /GlobalBrightness` 的
+  `org.ukui.SettingsDaemon.Brightness.setPrimaryBrightness(u)`（与手动亮度滑块同一条路，走合成器
+  gamma；见「亮度持久化」）。
+- **开关 = 控制中心「显示」页写的 gsettings 键**
+  `org.ukui.SettingsDaemon.plugins.auto-brightness auto-brightness`（`libdisplay.so` 里可见）。守护
+  进程只在该键为 true 时才动亮度；并写 `have-sensor=true`（`GlobalSignal.isPresenceLightSensor`）让
+  开关可见。**注意**：`active` 是“插件是否被加载”的键，与开关无关。
+- **不能用 openKylin 自带自动亮度插件**（`libauto-brightness.so` → `AutoBrightnessManager`）：它确实
+  通过 Qt5 Sensors 读光感（`net.hadess.SensorProxy.LightLevel`，本机可用），但其
+  `adjustBrightnessWithLux` 是经内部 **`BrightThread`**（`getRealTimeBrightness`/`setBrightness`）施加
+  亮度的，在本机 Wayland/kylin-wlcom 上**无任何效果**——真机实测：开灯/关灯、甚至用它自带的
+  `debug-lux`（`debug-mode=true` 后扫 `debug-lux`）亮度都纹丝不动。故障在编译好的二进制内部，故改用
+  自带守护进程。
+- **`sheng-autobrightness` 守护进程**：跑 `ssccli --sensor light` 读 lux → EMA 平滑 → 分段对数曲线
+  映射为亮度百分比（约暗 15% … 强光 100%）→ `dbus-send` 调 `setPrimaryBrightness`（输出死区 ≥3%、
+  写入间隔 ≥2s 防抖）。**以 `luser` 跑**（session bus 只认 uid 1000）。
+- 落地文件：`system_files_openkylin/usr/local/bin/sheng-autobrightness`、
+  `system_files_openkylin/etc/systemd/user/sheng-autobrightness.service`（enable 软链由构建为用户建）。
+
+> 与自带插件可能“双重控制”：本守护进程默认生效、而自带插件默认 `active=false`（不加装它）。
+> 若日后用户手动把插件 `active` 打开、且它在新环境里又能工作，可能两者抢亮度，届时二选一。
+
 ### openKylin 3.0：亮度持久化（转屏/重启不回到最亮）
 
 构建步骤 **6c（开关 `BRIGHTNESS_FIX_ENV`，默认开）** 给 `ukui-settings-daemon` 打补丁，
@@ -191,6 +221,7 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 | **缺 GPU 固件**（`a740_sqe.fw`/`gmu_gen70200.bin`）→ **黑屏** | 固件 `.deb` 的 blob 从 `/usr/lib/` **搬到 `/lib/firmware/`**，再叠加完整固件仓库 |
 | **WiFi（ath12k WCN7850）** 起不来 | `fix_wifi_firmware`：`board-2.bin` → `board.bin` 伪装 |
 | **openKylin3：自动转屏不工作**（`ssccli` 报 `SSC QMI Service not found`；屏幕不跟随旋转） | 缺 `protection-domain-mapper`：装并 enable `pd-mapper` + `chmod 0755 /usr/bin/adsprpcd` + enable `adsprpcd-sensorspd`（挂 multi-user.target），并用 `sheng-autorotate` 直连 `ssccli` 调 `set_rotation`；见「openKylin 3.0：自动转屏」 |
+| **openKylin3：自动亮度开关打开但屏幕不随环境光变** | 自带 `libauto-brightness.so` 能读光感，但经内部 `BrightThread` 施加亮度在本机 Wayland/kylin-wlcom 上无效（开灯/关灯/`debug-lux` 扫值都不变）→ 改用自带的 `sheng-autobrightness`（`ssccli --sensor light` → `setPrimaryBrightness`，见「openKylin 3.0：自动亮度」） |
 | **openKylin3：转屏 / 重启把屏幕亮度重置成最亮** | `ukui-settings-daemon` 只按 `/sys/class/backlight/*/brightness` 节点是否存在就认定“硬件背光可调”，把唯一内屏当笔记本内屏，**每次输出重配置（转屏）都把合成器亮度拉满到 100**；本平板 upm 其实调不了该节点（`CanSetBrightness=false`）。打补丁让 `UsdBaseClass::upmSupportAdjustBrightness()` 返回 false（`tools/sheng-usd-brightness-fix.sh`，步骤 6c；等价源码补丁见 `docs/patches/`）→ 改由合成器 gamma-manager 管亮度（值存 `/etc/ukui/usd/globalconf.ini [color]`），转屏/开机即保留，且无闪屏。见「openKylin 3.0：亮度持久化」 |
 | **`qrtr-ns.service` 失败** | 装 `qrtr` 包 + `ConditionPathExists` 兜底（没有就跳过） |
 | **`getty@ttyMSM0` 失败** | 去掉（内核命令行 `con_enabled=0`，该串口不存在） |
@@ -236,7 +267,7 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 | 音频（含开机自愈） | ✅ |
 | 120W 充电（MIPPS 认证） | ✅ |
 | GPU / 显示 | ✅ |
-| **传感器**（加速度计/陀螺/光感/霍尔） | 🟡 挂在 ADSP **SSC** 后面，走 `libssc`（QMI over QRTR）。**加速度计已可用并用于 openKylin3 自动转屏**（见「openKylin 3.0：自动转屏」）；需装 `protection-domain-mapper` + enable `adsprpcd`。`iio-sensor-proxy` 3.8 对本机固件仍会 core dump（缺 `measurement_id`），故用 `sheng-autorotate` 直连 `ssccli`；陀螺/磁力/光/距也能 `ssccli` 读到（未接桌面） |
+| **传感器**（加速度计/陀螺/光感/霍尔） | 🟡 挂在 ADSP **SSC** 后面，走 `libssc`（QMI over QRTR）。**加速度计已可用并用于 openKylin3 自动转屏**（见「openKylin 3.0：自动转屏」）；需装 `protection-domain-mapper` + enable `adsprpcd`。`iio-sensor-proxy` 3.8 对本机固件仍会 core dump（缺 `measurement_id`），故用 `sheng-autorotate` 直连 `ssccli`；陀螺/磁力/距也能 `ssccli` 读到，**光感已用于 openKylin3 自动亮度**（见「openKylin 3.0：自动亮度」） |
 | **相机** | ⚠️ 驱动/媒体图/传感器绑定都在，`libcamera` 也能识别并**抓原始帧**；但彩色卡在 libcamera 的 debayer **不支持该传感器 10-bit（R10_CSI2P）格式**。DDE 相机应用是 linglong 应用、假设高通私有栈，mainline 上多半用不了 |
 | **触控笔**（小米焦点笔） | ❌ 内核只有**充电/配对**侧（`pen_*` @ pmic-glink），**无书写输入**（触摸数字转换器不报笔，私有协议未解码） |
 
