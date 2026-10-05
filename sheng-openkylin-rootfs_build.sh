@@ -410,6 +410,13 @@ EOF
     # Pin s2idle, which resumes correctly.
     chroot "$ROOTDIR" systemctl enable sheng-mem-sleep.service 2>/dev/null || true
 
+    # Spark Store (Electron/Chromium) 花屏: on this device's mainline graphics
+    #     stack (msm + Mesa freedreno + Adreno) Chromium's GPU process crashes,
+    #     so the launcher must pass --disable-gpu. Ship the idempotent fixer +
+    #     a boot oneshot; the apt post-invoke hook (system_files_openkylin/etc/
+    #     apt) also re-applies it after any spark-store (re)install/upgrade.
+    chroot "$ROOTDIR" systemctl enable sheng-spark-store-gpu-fix.service 2>/dev/null || true
+
     # 7. Users + hostname + locale + timezone.
     setup_users "$ROOTDIR" "$ROOT_PASS" "$USER_NAME" "$USER_PASS" \
         "sudo,audio,video,render,input,plugdev,netdev"

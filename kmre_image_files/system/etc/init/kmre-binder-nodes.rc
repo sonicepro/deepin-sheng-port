@@ -1,0 +1,10 @@
+on early-init
+    exec -- /system/bin/sh /system/etc/kmre-binder-nodes.sh
+on init
+    exec -- /system/bin/sh /system/etc/kmre-binder-nodes.sh
+on post-fs
+    exec -- /system/bin/sh /system/etc/kmre-binder-nodes.sh
+on property:apexd.status=ready
+    exec -- /system/bin/sh /system/etc/kmre-binder-nodes.sh
+on boot
+    exec -- /system/bin/sh /system/etc/kmre-binder-nodes.sh

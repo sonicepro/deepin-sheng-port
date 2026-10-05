@@ -1,0 +1,9 @@
+# sheng: let the `luser` group read the ADSP/CDSP fastrpc nodes. The Qualcomm
+# Sensor Core accelerometer is reached through libssc (QMI over QRTR), but the
+# SSC data path also touches /dev/fastrpc-adsp — which the kernel creates as
+# 0600 root:root. Without this, ssccli (and thus sheng-autorotate) can only run
+# as root, but it must run as the desktop user to reach the session D-Bus.
+KERNEL=="fastrpc-adsp", SUBSYSTEM=="misc", MODE="0660", GROUP="luser"
+KERNEL=="fastrpc-adsp-secure", SUBSYSTEM=="misc", MODE="0660", GROUP="luser"
+KERNEL=="fastrpc-cdsp", SUBSYSTEM=="misc", MODE="0660", GROUP="luser"
+KERNEL=="fastrpc-cdsp-secure", SUBSYSTEM=="misc", MODE="0660", GROUP="luser"

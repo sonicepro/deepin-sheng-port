@@ -1,0 +1,11 @@
+#!/bin/bash
+# Installed by the rootfs build as /usr/bin/aapt (over the openKylin aapt, which
+# is a symlink to ../lib/android-sdk/build-tools/debian/aapt).
+# kylin-installer calls the old syntax `aapt badging <apk>`, but the android-sdk
+# aapt only accepts `aapt dump badging`. Without this, "install apk" fails with
+# the misleading "kylin mobile running environment has not started".
+REAL=/usr/lib/android-sdk/build-tools/debian/aapt
+if [ "$1" = "badging" ]; then
+    exec "$REAL" dump "$@"
+fi
+exec "$REAL" "$@"

@@ -1,0 +1,4 @@
+// Re-apply the Spark Store (Electron) '--disable-gpu' workaround after any
+// dpkg/apt operation that may have (re)installed/upgraded spark-store and thus
+// overwritten its launcher. Idempotent; no-op when spark-store is absent.
+DPkg::Post-Invoke { "/usr/local/sbin/sheng-spark-store-gpu-fix.sh || true"; };

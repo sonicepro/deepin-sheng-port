@@ -1,0 +1,11 @@
+[Unit]
+Description=zram zstd swap (kmre / multitasking memory headroom)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/kmre-zram.sh
+
+[Install]
+WantedBy=multi-user.target

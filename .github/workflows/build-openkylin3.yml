@@ -44,6 +44,14 @@ on:
         description: '移除 Kylin AI 栈（AI 助手/模型/推理引擎；保留桌面必需的客户端库）'
         type: boolean
         default: true
+      linglong:
+        description: '安装如意玲珑 (Linyaps) 运行环境 ll-cli/ll-box（不含商店本体）'
+        type: boolean
+        default: true
+      kmre:
+        description: '安装 KMRE (麒麟移动运行环境 / Android) 并打包已打补丁的容器镜像'
+        type: boolean
+        default: true
       skip_release:
         description: '跳过创建 GitHub Release'
         type: boolean
@@ -107,6 +115,8 @@ jobs:
           OPENKYLIN_IMG_URL: ${{ inputs.openkylin_img_url }}
           OPENKYLIN_VERSION: ${{ inputs.openkylin_version }}
           REMOVE_AI: ${{ inputs.remove_ai }}
+          LINGLONG_ENV: ${{ inputs.linglong }}
+          KMRE_ENV: ${{ inputs.kmre }}
           FIRMWARE_URL: https://github.com/${{ github.repository }}/releases/download/kernel-bundle-${{ inputs.kernel_version }}/sheng-firmware-master.tar.gz
           MIPPS_DEB_URL: https://github.com/${{ github.repository }}/releases/download/kernel-bundle-${{ inputs.kernel_version }}/xiaomi-mipps-auth.deb
         run: |
@@ -134,11 +144,11 @@ jobs:
           fi
           echo "==> kernel payload: $payload"
           python3 mkbootimg --kernel "$payload" \
-            --cmdline "root=PARTLABEL=userdata rootwait rw fsck.repair=yes" \
+            --cmdline "root=PARTLABEL=userdata rootwait rw fsck.repair=yes lsm=lockdown,yama,loadpin,safesetid,ipe,bpf,landlock,selinux androidboot.selinux=permissive" \
             --base 0x00000000 --kernel_offset 0x00008000 --tags_offset 0x01e00000 --pagesize 4096 \
             -o boot_sheng_singleboot.img
           python3 mkbootimg --kernel "$payload" \
-            --cmdline "root=PARTLABEL=linux rootwait rw fsck.repair=yes" \
+            --cmdline "root=PARTLABEL=linux rootwait rw fsck.repair=yes lsm=lockdown,yama,loadpin,safesetid,ipe,bpf,landlock,selinux androidboot.selinux=permissive" \
             --base 0x00000000 --kernel_offset 0x00008000 --tags_offset 0x01e00000 --pagesize 4096 \
             -o boot_sheng_dualboot.img
           ls -la boot_sheng_*.img

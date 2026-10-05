@@ -1,0 +1,12 @@
+[Unit]
+Description=Spark Store Electron GPU workaround (re-apply --disable-gpu)
+Documentation=https://github.com/sonicepro/deepin-sheng-port
+ConditionPathExists=/opt/durapps/spark-store/bin/spark-store
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sheng-spark-store-gpu-fix.sh
+
+[Install]
+WantedBy=multi-user.target

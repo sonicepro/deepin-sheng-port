@@ -1,0 +1,7 @@
+Package: kylin-kmre-manager
+Pin: version 3.1.0.0-0k0.8
+Pin-Priority: 1001
+
+Package: kylin-kmre-window
+Pin: version 3.1.0.0-0k0.12
+Pin-Priority: 1001

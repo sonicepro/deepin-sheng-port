@@ -1,0 +1,15 @@
+[Unit]
+Description=kmre Android container host fixups (CPU cap + broken 32-bit daemons)
+After=docker.service kylin-kmre-daemon.service
+Wants=docker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/kmre-fixups.sh
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

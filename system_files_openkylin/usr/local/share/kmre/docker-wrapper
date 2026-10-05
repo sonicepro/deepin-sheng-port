@@ -1,0 +1,19 @@
+#!/bin/sh
+# Installed by the rootfs build as /opt/system/bin/docker (the real binary is
+# moved to docker.real). kmre-daemon shells out to the docker CLI to create the
+# Android container and does NOT pass a device-cgroup-rule or mount binderfs, so
+# vold/dm inside the container hit EPERM. Inject both on run/create.
+REAL=/opt/system/bin/docker.real
+case "$1" in
+  run|create)
+    sub="$1"; shift
+    exec "$REAL" "$sub" \
+      --device-cgroup-rule 'c *:* rwm' \
+      --device-cgroup-rule 'b *:* rwm' \
+      -v /dev/binderfs:/binderfs \
+      "$@"
+    ;;
+  *)
+    exec "$REAL" "$@"
+    ;;
+esac

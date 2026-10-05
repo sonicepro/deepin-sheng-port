@@ -77,11 +77,11 @@ jobs:
           fi
           echo "==> kernel payload: $payload"
           python3 mkbootimg --kernel "$payload" \
-            --cmdline "root=PARTLABEL=userdata rootwait rw fsck.repair=yes" \
+            --cmdline "root=PARTLABEL=userdata rootwait rw fsck.repair=yes lsm=lockdown,yama,loadpin,safesetid,ipe,bpf,landlock,selinux androidboot.selinux=permissive" \
             --base 0x00000000 --kernel_offset 0x00008000 --tags_offset 0x01e00000 --pagesize 4096 \
             -o boot_sheng_singleboot.img
           python3 mkbootimg --kernel "$payload" \
-            --cmdline "root=PARTLABEL=linux rootwait rw fsck.repair=yes" \
+            --cmdline "root=PARTLABEL=linux rootwait rw fsck.repair=yes lsm=lockdown,yama,loadpin,safesetid,ipe,bpf,landlock,selinux androidboot.selinux=permissive" \
             --base 0x00000000 --kernel_offset 0x00008000 --tags_offset 0x01e00000 --pagesize 4096 \
             -o boot_sheng_dualboot.img
           ls -la boot_sheng_*.img

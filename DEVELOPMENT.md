@@ -11,11 +11,13 @@
 ```
 sheng-deepin-rootfs_build.sh        # Deepin 构建脚本（提取现成 arm64 用户态）
 sheng-openkylin-rootfs_build.sh     # openKylin 构建脚本（mmdebstrap/debootstrap 引导）
+sheng-openkylin3-rootfs_build.sh    # openKylin 3.0 构建脚本（从官方 arm64 镜像提取用户态）
 lib/rootfs-common.sh                # 从上游 vendored 的公共库
 system_files/                       # 注入 Deepin 镜像的设备服务/规则脚本
 system_files_openkylin/             # openKylin 用的通用设备配置（NM/udev）
 .github/workflows/build-deepin.yml  # Deepin 自包含 CI workflow
 .github/workflows/build-openkylin.yml # openKylin 自包含 CI workflow
+.github/workflows/build-openkylin3.yml # openKylin 3 自包含 CI workflow
 ```
 
 ### 流水线（`sheng-deepin-rootfs_build.sh`）
@@ -59,6 +61,70 @@ system_files_openkylin/             # openKylin 用的通用设备配置（NM/ud
 > ⚠️ 桌面元包名随 openKylin 版本可能不同，故用 **best-effort**：名字对不上只告警、不中断构建，
 > 仍产出可引导（可 SSH）的基础系统；按发行版实际情况覆盖 `OPENKYLIN_DESKTOP_META` 即可。
 
+### openKylin 3.0 流水线 + 如意玲珑 (Linyaps) 运行环境
+
+`sheng-openkylin3-rootfs_build.sh`（CI `build-openkylin3.yml`）与 Deepin 同构 —— **从
+openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不出完整 UKUI）。
+
+同一构建循环里有一段 **`install_linglong_env`（步骤 5d）**，负责把**如意玲珑运行环境**
+（`ll-cli` / `ll-box`，**不含商店本体**）装好；开关 `LINGLONG_ENV`（默认开，CI 里是
+`linglong` 布尔 input）。之所以要专门做，是因为 openKylin 3.0 自带的玲珑 1.5.7 在这台机器上
+装了也跑不起来 —— 共 **6 个坑**（都在真机验证过，构建里逐条处理）：
+
+1. **镜像自带 Qt5 是 nile(2.0) 构建**（`5.15.10+dfsg-3ok2.17`）跑在 huanghe 上 → 自带
+   ll-cli(1.5.7) 一碰 D-Bus 就段错误 → 升到 huanghe 重建版 `3ok2.18`。
+2. 官方 linyaps OBS 的 **`openkylin_3.0`/`openkylin_2.0` 目标只有 amd64**（无 arm64）
+   → 装 **arm64 的 `Deepin_25` 目标**（玲珑 1.14；改用 Qt6，镜像 Qt6 6.10.2 正合适）。
+3. linyaps 1.14 依赖 **`libyaml-cpp0.7`**，openKylin 只有 0.8 → 从 **Debian** 取 arm64 deb。
+4. **`linglong-box` 必须显式升 2.2.1**：`linglong-bin` 依赖写的是 `linglong-box | crun`，
+   系统已有 crun 时 apt 就不升 linglong-box → `/usr/bin/ll-box` 仍是 1.5.7、不认 1.14 用的
+   `--root`（daemon 日志：`ll-box: unrecognized option '--root'`）→ app 起不来（ll-cli 只笼统
+   报 `InitRunContext failed`，**真错在 daemon 侧**，排查看 `journalctl -u
+   org.deepin.linglong.PackageManager`）。
+5. deepin 的 `linglong-bin` postinst 有个**空 `for …; do / done` 循环**（debhelper 生成时 unit
+   列表为空），`/bin/sh`(dash) 语法报错 → 包卡半配置 → 构建里把该循环删掉后再
+   `dpkg --configure -a`。
+6. 镜像根的 **`/` 与 `/etc` 属主是 uid 1001**（非 root）→ `systemd-tmpfiles` 对所有规则报
+   `unsafe path transition` 直接跳过 → `/run/linglong` 被建成 `755 root` 而非 `1777
+   deepin-linglong` → `ll-cli run` 报 `failed to create directory: 权限不够`。构建里
+   `chown 0:0 / /etc` 归一成 root。
+
+> 装完后 `ll-cli` 可用（`ll-cli search` / `install` / `run` / `list`）。**菜单入口**靠
+> `XDG_DATA_DIRS`（由 `/usr/lib/linglong/generate-xdg-data-dirs.sh` 经 `/etc/profile.d/linglong.sh`
+> 注入 `/var/lib/linglong/entries/apps/share`），**首次/重新登录**后生效。
+> 社区版商店 `flutter-linglong-store` **不在构建内**（用户不需要）；它另需后端
+> `storeapi.linyaps.org.cn`，与本环境无关。
+
+### openKylin 3.0：自动转屏（ADSP SSC 加速度计 → UKUI 转屏）
+
+同一构建循环里有 **`install_autorotate`（步骤 6a；开关 `AUTOROTATE_ENV`，默认开）**，让平板
+**自动转屏**开箱即用。链条与根因（真机逐一验证）：
+
+- **UKUI 转屏能力** = 会话 D-Bus `com.kylin.statusmanager.interface.set_rotation(orientation, who, why)`
+  （`kylin-status-manager`）。取值 **`normal` / `left` / `right` / `upside-down`** —— 即 0°横 / 竖 / 竖 / 180°（“上下颠倒”）。
+- **传感器 = ADSP SSC 加速度计**（`icm4x6xx`），走 **libssc（QMI over QRTR）**。之前 QRTR 上没有
+  SSC service（`0x190` = 400）、`ssccli` 报 `SSC QMI Service not found`。**根因是缺
+  `protection-domain-mapper`**：ADSP 的传感器 PD（`sensorspd`）要等 AP 侧 servreg 就绪（`pd-mapper`）
+  再被 `adsprpcd` 拉起，才会注册该 service —— 只装 pd-mapper 或只跑 adsprpcd 都不行，且要**清启动
+  （reboot）** 后才生效。构建里：装 `protection-domain-mapper`（+`qrtr-tools`/`rmtfs`）并 enable
+  `pd-mapper`；把镜像自带的 `/usr/bin/adsprpcd`（**0644 → `ExecStart` 203/EXEC**）`chmod 0755`；
+  enable `adsprpcd-sensorspd` 并挂到 `multi-user.target`。
+- **不能用 openKylin 自带自动转屏**：它走 Qt5 Sensors → `iio-sensor-proxy` → libssc。本机固件的
+  加速度计属性里**没有 `measurement_id`**（mount-matrix 也全 0），`iio-sensor-proxy` 3.8 在
+  `src/drv-ssc-accel.c:121` 断言失败 → **core dump** → `isSupportedAutoRotation()` 恒 `false`。
+  故改用自带的 **`sheng-autorotate`** 守护进程：跑 `ssccli --sensor accelerometer` 读 X/Y/Z →
+  `atan2(gy,gx)` → `normal/left/right/upside-down` → `dbus-send` 调 `set_rotation`（0.6s 防抖、
+  平放不转、dbus 失败重试、ssccli 挂了自动重启）。**以 `luser` 跑**（session bus 只认 uid 1000；
+  root 连不上用户 session bus）。
+- **权限**：`/dev/fastrpc-adsp` 是 `0600 root:root` → 覆盖层 `70-sheng-fastrpc.rules` 把
+  `fastrpc-*` 改 `0660 group=luser`，`luser` 才能跑 `ssccli`。
+- 落地文件：`system_files_openkylin/usr/local/bin/sheng-autorotate`、
+  `system_files_openkylin/etc/systemd/user/sheng-autorotate.service`（enable 软链由构建为用户建）、
+  `system_files_openkylin/etc/udev/rules.d/70-sheng-fastrpc.rules`。
+
+> 轴映射（真机标定）：屏法线 = 传感器 **Z**；正常横屏时 in-plane 重力 = **+X** →
+> `+X→normal`、`+Y→left`、`-X→upside-down`、`-Y→right`。
+
 ### 只构建 boot 镜像（轻量，不重建 rootfs）
 
 只想要/重做 `boot_sheng_*.img`（比如已有 rootfs）时，跑 **Build boot images** workflow
@@ -75,8 +141,12 @@ system_files_openkylin/             # openKylin 用的通用设备配置（NM/ud
 | **live 根没有 apt 列表** → `apt-get install` 报“没有可用的软件包” | 写死 Deepin 源 + 装包前 `apt-get update` |
 | **`deepin-face` / `deepin-immutable-cleanup` 失败**（无面容硬件 / ISO 的 ostree 不可变部署，我们是普通 ext4） | `systemctl mask` 掉 |
 | **所有 linglong 应用（QQ/bilibili…）起不来**（`failed to create directory` / `build cfg error`） | ISO 根把 `/` `/etc` `/usr` 等 **309 个文件属主设成了 uid 1001**（非 root）→ `systemd-tmpfiles` 拒跑（`unsafe path transition`）→ `/run/linglong` 没建出来；构建里 `chown` 回 **root** |
+| **openKylin3：玲珑 app 打不开**（`InitRunContext failed` / `ll-box: unrecognized option '--root'`） | `linglong-box` 没跟着 `linglong-bin` 升（`linglong-box | crun` 被已有 crun 满足）→ `/usr/bin/ll-box` 还是 1.5.7；构建显式装 `linglong-box` 2.2.1（详见「如意玲珑运行环境」） |
+| **openKylin3：玲珑 app 装不上 / 权限错**（`failed to create directory: 权限不够`） | 同 uid-1001 病根：`/` `/etc` 属主是 1001 → `systemd-tmpfiles` 跳过 → `/run/linglong` 是 `755 root` 而非 `1777`；构建 `chown 0:0 / /etc` |
+| **openKylin3：`ll-cli` 一碰 D-Bus 就段错误** | 镜像自带 Qt5 是 nile 构建；构建 `apt-get install --only-upgrade libqt5{core,dbus,gui,network,widgets}5` 升到 huanghe 重建版 |
 | **缺 GPU 固件**（`a740_sqe.fw`/`gmu_gen70200.bin`）→ **黑屏** | 固件 `.deb` 的 blob 从 `/usr/lib/` **搬到 `/lib/firmware/`**，再叠加完整固件仓库 |
 | **WiFi（ath12k WCN7850）** 起不来 | `fix_wifi_firmware`：`board-2.bin` → `board.bin` 伪装 |
+| **openKylin3：自动转屏不工作**（`ssccli` 报 `SSC QMI Service not found`；屏幕不跟随旋转） | 缺 `protection-domain-mapper`：装并 enable `pd-mapper` + `chmod 0755 /usr/bin/adsprpcd` + enable `adsprpcd-sensorspd`（挂 multi-user.target），并用 `sheng-autorotate` 直连 `ssccli` 调 `set_rotation`；见「openKylin 3.0：自动转屏」 |
 | **`qrtr-ns.service` 失败** | 装 `qrtr` 包 + `ConditionPathExists` 兜底（没有就跳过） |
 | **`getty@ttyMSM0` 失败** | 去掉（内核命令行 `con_enabled=0`，该串口不存在） |
 | **没声音**（WirePlumber 走 ACP 不走 UCM → Dummy 输出） | 打补丁 `use-acp=false` + `sheng-audio-rebind`（ADSP 竞态后重探）+ `sheng-audio-ucm`（应用 UCM + 开 6 个 cs35l43 功放） |
@@ -116,7 +186,7 @@ system_files_openkylin/             # openKylin 用的通用设备配置（NM/ud
 | 音频（含开机自愈） | ✅ |
 | 120W 充电（MIPPS 认证） | ✅ |
 | GPU / 显示 | ✅ |
-| **传感器**（重力/陀螺/光感/霍尔） | ❌ 挂在 ADSP **SSC** 后面，需 `libssc` + SSC 版 `iio-sensor-proxy`（任何现成仓库都没有，得自己编）；配置文件 `sheng-sensors` 已在 |
+| **传感器**（加速度计/陀螺/光感/霍尔） | 🟡 挂在 ADSP **SSC** 后面，走 `libssc`（QMI over QRTR）。**加速度计已可用并用于 openKylin3 自动转屏**（见「openKylin 3.0：自动转屏」）；需装 `protection-domain-mapper` + enable `adsprpcd`。`iio-sensor-proxy` 3.8 对本机固件仍会 core dump（缺 `measurement_id`），故用 `sheng-autorotate` 直连 `ssccli`；陀螺/磁力/光/距也能 `ssccli` 读到（未接桌面） |
 | **相机** | ⚠️ 驱动/媒体图/传感器绑定都在，`libcamera` 也能识别并**抓原始帧**；但彩色卡在 libcamera 的 debayer **不支持该传感器 10-bit（R10_CSI2P）格式**。DDE 相机应用是 linglong 应用、假设高通私有栈，mainline 上多半用不了 |
 | **触控笔**（小米焦点笔） | ❌ 内核只有**充电/配对**侧（`pen_*` @ pmic-glink），**无书写输入**（触摸数字转换器不报笔，私有协议未解码） |
 
@@ -126,7 +196,7 @@ system_files_openkylin/             # openKylin 用的通用设备配置（NM/ud
 |---|---|
 | **登录界面白框** | DDE greeter 拿不到 Application Manager/主题（非原厂硬件的老毛病）；已开 autologin，不影响进桌面 |
 | **maliit 屏幕键盘** | Wayland 优先，X11 下窗口显示不了；X11 只能用 onboard |
-| **传感器 / 相机 / 触控笔** | 见上「硬件支持现状」——mainline 上游限制 |
+| **相机 / 触控笔** | 见上「硬件支持现状」——mainline 上游限制（传感器/加速度计已可用，见「openKylin 3.0：自动转屏」） |
 
 ## 已知注意点
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=Create host dummy binder device nodes for KMRE (container mounts binderfs)
+After=local-fs.target
+Before=kylin-kmre-daemon.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/kmre-host-binder.sh
+
+[Install]
+WantedBy=multi-user.target
