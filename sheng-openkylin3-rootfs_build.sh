@@ -642,6 +642,40 @@ PYEOF
     echo "   指纹安装完成（控制中心/锁屏可用；只保留 1 个模板最快）"
 }
 
+# --- openKylin 系统更新修复（非 ostree 系统） -------------------------
+# 镜像的 openKylin 是 ostree 部署；我们是摊平 ext4，造成系统更新在真机上失败/版本串乱：
+#   1) 更新拉通用内核（`linux-generic`）→ 其 postinst 跑 `ostree` 包的
+#      `/etc/kernel/{postinst,postrm}.d/zz-ostree-update`，在非 ostree 系统上报
+#      `system not ostree type` 并 exit 1 → 内核配置失败 → 整个更新失败。→ 改成 no-op。
+#   2) 镜像自带的 `/usr/lib/system-info/kylin-system-version.conf` 是 0 字节 →
+#      `kylin-system-updater` 取 `[SYSTEM]` 失败 → 界面把异常当版本串打印
+#      （`No section:'SYSTEM'`）。→ 补 `[SYSTEM]` 段。
+#   3) 通用内核对 sheng 无用（我们引导 sheng mainline），每次更新都换一套
+#      （含 ~100MB initrd）→ hold 住。
+fix_system_update() {
+    local rootdir="$1"
+    echo "==> 修 openKylin 系统更新（非 ostree 系统）..."
+
+    # (1) ostree 内核钩子 → no-op（否则内核 postinst 在非 ostree 系统必败）。
+    local h
+    for h in "$rootdir/etc/kernel/postinst.d/zz-ostree-update" \
+             "$rootdir/etc/kernel/postrm.d/zz-ostree-update"; do
+        [ -f "$h" ] && printf '#!/bin/sh\n# sheng: no-op on non-ostree system\nexit 0\n' > "$h"
+    done
+    echo "   已把 zz-ostree-update 钩子改成 no-op"
+
+    # (2) kylin-system-version.conf 空的就补 [SYSTEM]。
+    local vf="$rootdir/usr/lib/system-info/kylin-system-version.conf"
+    if [ -f "$vf" ] && [ ! -s "$vf" ]; then
+        printf '[SYSTEM]\nos_version = 3.0\nupdate_version = 3.0\n' > "$vf"
+        echo "   已补 kylin-system-version.conf 的 [SYSTEM] 段"
+    fi
+
+    # (3) hold 通用内核 (best-effort)。
+    chroot "$rootdir" apt-mark hold linux-generic linux-image-generic linux-headers-generic \
+        2>/dev/null || true
+}
+
 # --- Build loop over boot modes ---------------------------------------------
 mapfile -t BOOTMODES < <(parse_boot_modes "$TARGET_MODE") || exit 1
 MODES_LEFT=${#BOOTMODES[@]}
@@ -804,6 +838,10 @@ for MODE in "${BOOTMODES[@]}"; do
     if is_true "$FINGERPRINT_ENV"; then
         install_fingerprint "$ROOTDIR" || echo "WARN: 指纹安装步骤返回非零，继续构建" >&2
     fi
+
+    # 5g. 修 openKylin 系统更新（非 ostree 系统：ostree 钩子 + 版本文件 + 通用内核）。
+    #     不修的话真机点“系统更新”会失败或显示异常版本串。best effort。
+    fix_system_update "$ROOTDIR" || echo "WARN: 系统更新修复步骤返回非零，继续构建" >&2
 
     # 6. Users + hostname + locale + timezone.
     setup_users "$ROOTDIR" "$ROOT_PASS" "$USER_NAME" "$USER_PASS" \

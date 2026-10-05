@@ -206,6 +206,9 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 | **待机秒醒 / 屏幕自动亮**（插充电时尤甚） | sheng（SM8550）的 `deep` 挂起会在几秒内自唤醒（充电时几乎必现）→ `system_files` 加 `sheng-mem-sleep.service`：开机把默认睡眠态钉成 **`s2idle`**，`deep` 不再启用 |
 | **openKylin3：指纹（控制中心/锁屏）看不到设备 / 必须松手才解锁** | openKylin 图形登录/锁屏只认 Kylin `biometric-auth`（USB 发现看不到非 USB 的 FPC1553）。构建：`goodixmoc.so`→`fpc1553.so`（改烤死的驱动名 @0x8430）+ 追加 `[fpc1553]` 段 + 服务 drop-in（FP_FPC1553=1 + LD_LIBRARY_PATH）+ 覆盖"匹配即上报"的私有 `libfprint`（步骤 5f，见「openKylin 3.0：指纹」） |
 | **openKylin3：点休眠 ~1.8 秒自动唤醒** | `fpc1553` 内核模块在 `fpc1553_prepare` 里**无条件** `irq_set_irq_wake(1)` → 指纹 IRQ 成唤醒源（`/sys/kernel/irq/N/wakeup` 只读，用户态关不掉）。构建覆盖**去掉该调用**的 `fpc1553.ko`（步骤 5f） |
+| **openKylin3：系统更新失败**（装通用内核时报错） | openKylin 是 ostree 部署；`ostree` 包把 `/etc/kernel/{postinst,postrm}.d/zz-ostree-update` 当内核钩子，在**非 ostree**（摊平 ext4）系统上报 `system not ostree type` 并 **exit 1** → 通用内核 `linux-image-*-generic` 的 postinst 失败 → 整个更新失败。构建把该钩子改成 **no-op**（步骤 5g） |
+| **openKylin3：更新界面显示 `openKylin No section:'SYSTEM'`** | 镜像自带的 `/usr/lib/system-info/kylin-system-version.conf` 是 **0 字节** → `kylin-system-updater` 取 `[SYSTEM]` 段失败（`NoSectionError`）→ 界面把异常串当版本号打印。构建补 `[SYSTEM]` 段（步骤 5g） |
+| **openKylin3：每次更新都换通用内核**（~100MB initrd，对 sheng 无用） | 镜像带 `linux-generic`；对 sheng 无意义（引导的是 sheng mainline 内核）。构建 `apt-mark hold linux-generic linux-image-generic linux-headers-generic`（步骤 5g，best-effort） |
 | **刷完分区没撑满** | fstab 加 `x-systemd.growfs`（首启自动扩容） |
 | **要做单次解压**（GitHub zip + 7z 双层） | 直接输出 sparse `.img`，Release 走 `.img.gz` 分卷 |
 | **屏幕键盘难用 / 皮肤·尺寸不对** | dconf 系统默认（`system_files/etc/dconf/db/local.d/00-sheng-onboard`）：onboard 停靠底部 + **Blackboard 皮肤 / Small 布局** + 自动弹出；`window-handles=''` 防多指滑动误改大小。**两个前提缺一不可**：(1) 必须 `dconf update` 编译（需 `dconf-cli`，构建里装）——否则 `/etc/dconf/db/local` 根本不生成、默认静默失效（gsettings 一直报 `unable to open /etc/dconf/db/local`）；(2) `use-system-defaults=true`——onboard 该键（schema 默认 true，含义“先从系统默认读配置、首启后自动重置”）设成 false 就永不读系统默认、转而用 onboard 自带默认，皮肤尺寸全不对 |
