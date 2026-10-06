@@ -20,6 +20,14 @@ IFACE = "com.kylin.statusmanager.interface"
 OBJ = "/"
 POLL = re.compile(r"X=(-?\d+(?:\.\d+)?)\s+Y=(-?\d+(?:\.\d+)?)\s+Z=(-?\d+(?:\.\d+)?)")
 
+# While the panel is blanked we must NOT rotate: a rotation reconfigures the
+# output and kylin-wlcom un-blanks the panel on it, so the screen would light
+# back up on its own.  sheng-screen-toggle (the power-key "关闭显示器" action)
+# creates/removes this per-user marker.
+SCREEN_OFF = os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()),
+    "sheng-panel-off")
+
 # ----- calibration ---------------------------------------------------
 # The accelerometer reports specific force in m/s^2 with the sensor's own
 # axes (firmware mount-matrix is all-zero, so we work in raw sensor axes).
@@ -101,6 +109,11 @@ def main():
                 if debug:
                     warn("g=(%.2f,%.2f,%.2f) -> %s (cur=%s)" % (gx, gy, gz, o, cur))
                 if o is None or o == cur:
+                    pending = None
+                    continue
+                # Panel blanked -> a rotation would un-blank it; skip (and let the
+                # next sample after it comes back rotate if needed).
+                if os.path.exists(SCREEN_OFF):
                     pending = None
                     continue
                 now = time.time()

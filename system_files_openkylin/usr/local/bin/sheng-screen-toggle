@@ -1,0 +1,80 @@
+#!/bin/bash
+# sheng-screen-toggle — turn the panel off/on (DPMS) for the sheng power-key
+# "关闭显示器" action.
+#
+# kylin-wlcom un-blanks the panel on the power-key input that triggered this
+# action, so a plain `kscreen-doctor -d off` relights at once.  To blank, we wait
+# until the power key is RELEASED (via the pmic_pwrkey evdev node) and only then
+# blank — the screen stays off.  A per-user state file remembers that we blanked,
+# so the next press just wakes the panel (our "-d on" is a harmless no-op).
+#
+# "唤醒屏幕时需要密码" (org.ukui.screensaver close-activation-enabled) is normally
+# enforced by ukui-screensaver on ITS idle-blank path; a bare DPMS blank bypasses
+# it.  So, when the setting is on, we also lock the screen when blanking — waking
+# it then asks for the password.  While locked, ukui-settings-daemon's media-keys
+# suppresses the power-key action (getScreenLockState), so the next press just
+# wakes the panel to the lock screen (no state file needed in that case).
+export QT_QPA_PLATFORM=wayland
+KD=/usr/bin/kscreen-doctor
+ST="/run/user/$(id -u)/sheng-panel-off"
+if [ -e "$ST" ]; then
+    rm -f "$ST"
+    "$KD" -d on >/dev/null 2>&1 || true
+    exit 0
+fi
+python3 - <<'PY' 2>/dev/null || sleep 0.5
+import glob, struct, select, time, fcntl, sys
+KEY_POWER  = 116
+EVIOCGNAME = 0x81004506                 # _IOC(_IOC_READ,'E',0x06,256)
+EVIOCGKEY  = 0x80604518                 # _IOC(_IOC_READ,'E',0x18,96)
+def find_dev():
+    for d in ["/dev/input/event0"] + sorted(glob.glob("/dev/input/event*")):
+        try:
+            f = open(d, "rb"); buf = bytearray(256)
+            try:
+                n = fcntl.ioctl(f.fileno(), EVIOCGNAME, buf)
+                nm = bytes(buf[:n]).split(b"\x00")[0].decode("utf-8", "replace").lower()
+            except Exception:
+                nm = ""
+            f.close()
+            if "pwr" in nm:
+                return d
+        except Exception:
+            continue
+    return None
+dev = find_dev()
+if not dev:
+    sys.exit(0)
+try:
+    f = open(dev, "rb", buffering=0); fd = f.fileno()
+except Exception:
+    sys.exit(0)
+def held():
+    b = bytearray(96)
+    try:
+        fcntl.ioctl(fd, EVIOCGKEY, b)
+    except Exception:
+        return None
+    return (b[KEY_POWER // 8] >> (KEY_POWER % 8)) & 1
+h = held()
+if h is None:                            # can't tell -> a short settle
+    time.sleep(0.5); sys.exit(0)
+if h:                                    # held: wait for release (max 3s)
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        r, _, _ = select.select([f], [], [], deadline - time.time())
+        if not r:
+            break
+        data = f.read(24)
+        if not data or len(data) < 24:
+            break
+        etype, code, value = struct.unpack_from("HHi", data, 16)
+        if etype == 1 and code == KEY_POWER and value == 0:
+            break
+PY
+if [ "$(gsettings get org.ukui.screensaver close-activation-enabled 2>/dev/null)" = "true" ]; then
+    ukui-screensaver-command --lock >/dev/null 2>&1 || true
+else
+    : > "$ST"
+fi
+"$KD" -d off >/dev/null 2>&1 || true

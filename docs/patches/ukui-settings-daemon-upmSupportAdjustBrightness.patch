@@ -1,0 +1,47 @@
+ukui-settings-daemon: let the compositor gamma-manager own brightness on sheng
+
+On the Xiaomi Pad 6S Pro (sheng) the panel exposes
+/sys/class/backlight/ktz8866-backlight but openKylin's upm cannot drive it
+(org.ukui.powermanagement -> CanSetBrightness == false), so
+UsdBaseClass::upmSupportAdjustBrightness() -- which only checks for the
+existence of a backlight node -- returns true.  The compositor gamma-manager
+(GmHelper) then treats the first (and only) output as a "notebook internal
+panel" and pegs its brightness to 100 on every screen reconfiguration
+(GmHelper::updateWlcomOutputInfo and friends), so the user's brightness is lost
+on screen rotation and at session start.
+
+Fix: make the hardware-backlight path own brightness only when upm can actually
+set it.  Otherwise the gamma-manager (which persists brightness in
+/etc/ukui/usd/globalconf.ini, section [color]) owns the screen brightness, and
+it is preserved across rotation / reboot.
+
+Equivalent live/build change: tools/sheng-usd-brightness-fix.sh patches the
+compiled copies of this function (daemon binary + every plugin .so).
+
+--- a/common/usd_base_class.cpp
++++ b/common/usd_base_class.cpp
+@@ -1326,6 +1326,24 @@ bool UsdBaseClass::upmSupportAdjustBrightness()
+     static int ret = -1;
+     if (ret > -1) return ret;
+     ret = 0;
++
++    // [sheng] The hardware backlight only owns brightness when the
++    // power-management service can actually drive it. On the sheng tablet the
++    // panel exposes /sys/class/backlight/ktz8866-backlight but upm reports
++    // CanSetBrightness == false, so the compositor gamma-manager MUST own the
++    // brightness. Otherwise the gamma-manager treats the first (and only)
++    // output as a notebook "internal panel" and pegs it to 100 on every screen
++    // reconfiguration (rotation), dropping the user's brightness to maximum.
++    // See GmHelper::updateWlcomOutputInfo().
++    QDBusInterface powerInterface("org.ukui.powermanagement",
++                                  "/",
++                                  "org.ukui.powermanagement.interface",
++                                  QDBusConnection::systemBus());
++    QDBusReply<bool> setable = powerInterface.call("CanSetBrightness");
++    if (setable.isValid() && !setable.value()) {
++        return ret; // 0 -> compositor gamma-manager owns brightness
++    }
++
+     QDir brightnessNodeDir(BRIGHTNESS_NODE_PATH);
+     QStringList nodeDirs = brightnessNodeDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+ 

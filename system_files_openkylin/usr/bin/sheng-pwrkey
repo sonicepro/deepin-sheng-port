@@ -1,0 +1,16 @@
+#!/bin/bash
+# sheng-pwrkey — drop-in for the "ukui-session-tools" program that
+# ukui-settings-daemon's media-keys plugin runs when the hardware power key is
+# pressed (libmedia-keys.so's doSessionAction() program string is repointed to
+# this name by tools/sheng-power-button-blank-fix.sh).  For the "关闭显示器"
+# (blank) power action it toggles the panel; every other power action
+# (suspend / shutdown / hibernate / interactive) passes through to the real
+# ukui-session-tools unchanged.
+set -e
+if [ "$#" -eq 0 ]; then
+    bp=$(gsettings get org.ukui.power-manager button-power 2>/dev/null | tr -d "'\"")
+    if [ "$bp" = "blank" ]; then
+        exec /usr/local/bin/sheng-screen-toggle
+    fi
+fi
+exec /usr/bin/ukui-session-tools "$@"

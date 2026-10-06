@@ -35,9 +35,30 @@
 #       AUTOBRIGHTNESS_ENV=0 (optional — skip the auto-brightness setup: the
 #                       sheng-autobrightness daemon, SSC ambient light -> UKUI
 #                       screen brightness); default: on
-#       BRIGHTNESS_FIX_ENV=0 (optional — skip patching ukui-settings-daemon so the
-#                       compositor gamma-manager owns screen brightness (no
-#                       reset-to-max on rotation / boot)); default: on
+#       BRIGHTNESS_FIX_ENV=0 (optional — skip the ukui-settings-daemon brightness
+#                       patches: upmSupportAdjustBrightness()->false and the
+#                       composer software-brightness neutraliser); default: on
+#       SHENG_COMPOSITOR_BRIGHTNESS (optional — the constant the compositor
+#                       software brightness is pinned to; 100 == no dim);
+#                       default: 100
+#       PANEL_BRIGHTNESS_ENV=0 (optional — skip the panel-backlight engine: the
+#                       sheng-panel-brightness daemon that maps the UKUI
+#                       brightness value onto /sys/class/backlight); default: on
+#       BRIGHTNESS_BRIDGE_ENV=0 (optional — skip the control-center "Display"
+#                       brightness-slider bridge: mirror the gsettings key
+#                       org.ukui.power-manager brightness-ac to the working
+#                       setPrimaryBrightness path); default: on
+#       SUSPEND_BACKLIGHT_ENV=0 (optional — skip cutting the panel backlight at
+#                       suspend (logind PrepareForSleep), so the backlight no
+#                       longer stays lit during the inhibitor wait); default: on
+#       INHIBIT_FIX_ENV=0 (optional — skip cutting logind's InhibitDelayMaxSec to
+#                       1s (kylin-process-manager's ~5s sleep delay lock delays
+#                       the actual suspend, so the screen is dark but the power
+#                       key looks dead)); default: on
+#       POWER_BLANK_ENV=0 (optional — skip adding the "关闭显示器" option to the
+#                       control center "按下电源键时执行" dropdown and making the
+#                       power key blank/unblank the panel when it is selected);
+#                       default: on
 #       DISPLAY_SCALE_ENV=0 (optional — skip adding 250%/275% entries to the
 #                       control center "Display" screen-zoom dropdown; the panel
 #                       is 3048px wide, below the hardcoded 3072/3840 gates, so
@@ -557,6 +578,81 @@ install_autobrightness() {
     echo "   自动亮度配置完成"
 }
 
+# --- 「设置→显示器→亮度」滑块桥接 (brightness-ac -> setPrimaryBrightness) --------
+# 目标：控制中心「设置→显示器」的亮度滑块开箱即用。真机根因（见 DEVELOPMENT.md）：
+#   ukui-control-center 的 libdisplay.so 由其 Widget::isSetGammaBrightness() 决定走
+#   gamma 路(setPrimaryBrightness) 还是硬件路(brightness-ac)。本机恒为 false
+#   （upm 在但 CanSetBrightness=false、产品名非 VAH510/"all in one"、无
+#   gammaforbrightness 键）→ 只写 gsettings org.ukui.power-manager brightness-ac，
+#   指望 upm 走硬件背光；而本机 upm 驱动不了 ktz8866（RegulateBrightness 返回
+#   "no effective node"）→ 拖动无效。侧栏/快捷中心直接走 setPrimaryBrightness
+#   （gamma）所以正常。做法：用户级守护「双向」桥接——brightness-ac 变化 → 转发到
+#   org.ukui.SettingsDaemon /GlobalBrightness setPrimaryBrightness(u)（滑块能真正改亮度）；
+#   当前亮度 → 回写 brightness-ac（滑块位置反映真实亮度）。
+#   BRIGHTNESS_BRIDGE_ENV=0 可跳过。
+BRIGHTNESS_BRIDGE_ENV="${BRIGHTNESS_BRIDGE_ENV:-1}"
+
+install_brightness_bridge() {
+    local rootdir="$1" uname="$2"
+    echo "==> 配置「设置→显示器」亮度滑块桥接..."
+
+    # (1) 落地守护进程 + 用户级服务（显式安装保证权限位）。
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/bin/sheng-brightness-ac-bridge" \
+        "$rootdir/usr/local/bin/sheng-brightness-ac-bridge"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/systemd/user/sheng-brightness-ac-bridge.service" \
+        "$rootdir/etc/systemd/user/sheng-brightness-ac-bridge.service"
+
+    # (2) 建用户级 enable 软链（构建期没有用户 session，systemctl --user enable 用不了）。
+    local udir="$rootdir/home/${uname}/.config/systemd/user"
+    local target
+    for target in default.target graphical-session.target; do
+        mkdir -p "$udir/${target}.wants"
+        ln -sf "/etc/systemd/user/sheng-brightness-ac-bridge.service" \
+            "$udir/${target}.wants/sheng-brightness-ac-bridge.service"
+    done
+    chown -R "${uname}:${uname}" "$rootdir/home/${uname}/.config" 2>/dev/null || true
+
+    echo "   显示器亮度滑块桥接配置完成"
+}
+
+# --- 面板背光引擎 (UKUI 亮度值 -> 真实面板背光) ---------------------------------
+# 目标：亮度由真实背光承担，彻底干掉合成器「软件亮度滤镜」（对像素相乘，压暗部、
+#   暗场景发灰）。真机验证过的链路：
+#   1) 所有亮度 UI —— 快捷操作/侧栏滑块、控制中心「设置→显示器」滑块（经本仓库
+#      sheng-brightness-ac-bridge）、自动亮度（sheng-autobrightness）——都收敛到
+#      ukui-settings-daemon 的 org.ukui.SettingsDaemon.Brightness.setPrimaryBrightness(u)，
+#      它把用户值(0..100)持久化到 /etc/ukui/usd/globalconf.ini 的 [color] <output>=<v>。
+#      真机实测：该 config 值是忠实的用户值，且与合成器亮度**解耦**（把合成器钉到
+#      任意值都不影响它）→ 稳定的控制通道。
+#   2) 合成器软件亮度由步骤 6c 的补丁钉在 100（== 不减光）→ 无滤镜。
+#   3) 本守护进程 sheng-panel-brightness 读该 config 值 → 线性映射后写入
+#      /sys/class/backlight/ktz8866-backlight/brightness。三条 UI 路径因此一起驱动背光。
+#   须在 setup_users 之后（要建用户级服务软链）。PANEL_BRIGHTNESS_ENV=0 可跳过。
+PANEL_BRIGHTNESS_ENV="${PANEL_BRIGHTNESS_ENV:-1}"
+
+install_panel_brightness() {
+    local rootdir="$1" uname="$2"
+    echo "==> 配置面板背光引擎 (UKUI 亮度 -> 真实背光)..."
+
+    # (1) 落地守护进程 + 用户级服务（显式安装保证权限位）。
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/bin/sheng-panel-brightness" \
+        "$rootdir/usr/local/bin/sheng-panel-brightness"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/systemd/user/sheng-panel-brightness.service" \
+        "$rootdir/etc/systemd/user/sheng-panel-brightness.service"
+
+    # (2) 建用户级 enable 软链（构建期没有用户 session，systemctl --user enable 用不了）。
+    local udir="$rootdir/home/${uname}/.config/systemd/user"
+    local target
+    for target in default.target graphical-session.target; do
+        mkdir -p "$udir/${target}.wants"
+        ln -sf "/etc/systemd/user/sheng-panel-brightness.service" \
+            "$udir/${target}.wants/sheng-panel-brightness.service"
+    done
+    chown -R "${uname}:${uname}" "$rootdir/home/${uname}/.config" 2>/dev/null || true
+
+    echo "   面板背光引擎配置完成"
+}
+
 # --- 「设置→显示器→缩放屏幕」加 250% / 275% 档 --------------------------------
 # 目标：控制中心「设置→显示器」的缩放下拉框能选 250% 与 275%。openKylin 3.0 的
 #   ukui-control-center libdisplay.so 里 OutputConfig::initScaleItem() 用**硬编码
@@ -604,6 +700,46 @@ print("   共把 %d 处缩放闸门阈值下调到 2560" % total)
 PY
     done
     echo "   缩放屏幕 250%/275% 档配置完成"
+}
+
+# --- 休眠时立即关背光 (logind PrepareForSleep -> backlight off) ---------------
+# 目标：消除点休眠后"黑屏但背光还亮一段时间"的空档。根因（真机定位）：logind 收到
+#   休眠请求先发 PrepareForSleep(true)，合成器立即关输出（画面黑）但不动背光；背光
+#   要等内核真正 suspend 才由 DSI 面板/ktz8866 驱动切断，而 logind 之前要等一批
+#   delay inhibitor（Screen Locker/进程管理器/QQ…）放行——这段时间就是"背光还亮"。
+#   系统里没有任何 sleep hook 写 /sys/class/backlight。做法：系统级守护监听
+#   PrepareForSleep，收到 true 立刻把背光写到 0，收到 false（恢复/取消）还原。
+#   SUSPEND_BACKLIGHT_ENV=0 可跳过。
+SUSPEND_BACKLIGHT_ENV="${SUSPEND_BACKLIGHT_ENV:-1}"
+
+install_suspend_backlight() {
+    local rootdir="$1"
+    echo "==> 配置休眠即时关背光 (PrepareForSleep -> backlight off)..."
+
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/sbin/sheng-suspend-backlight" \
+        "$rootdir/usr/local/sbin/sheng-suspend-backlight"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/systemd/system/sheng-suspend-backlight.service" \
+        "$rootdir/etc/systemd/system/sheng-suspend-backlight.service"
+    chroot "$rootdir" systemctl enable sheng-suspend-backlight.service 2>/dev/null \
+        || echo "WARN: enable sheng-suspend-backlight 失败" >&2
+
+    echo "   休眠即时关背光配置完成"
+}
+
+# --- 缩短挂起等待 (logind InhibitDelayMaxSec) --------------------------------
+# 目标：把"屏幕灭 → 真正睡"之间 ~5 秒的窗口压到 1 秒。根因：kylin-process-manager
+#   挂着一个 "sleep" delay 锁不放（实测放到超时才放），logind 会硬等满
+#   InhibitDelayMaxSec（默认 5s）才强制挂起；这段时间屏幕已黑、系统还没睡，按电源
+#   键无效。装一个 logind drop-in 把它设为 1s。INHIBIT_FIX_ENV=0 可跳过。
+#   （suspend→resume 本身仍有 s2idle 往返开销，这里只去掉可避免的"挂起前等待"。）
+INHIBIT_FIX_ENV="${INHIBIT_FIX_ENV:-1}"
+
+install_logind_inhibit() {
+    local rootdir="$1"
+    echo "==> 缩短挂起等待 (logind InhibitDelayMaxSec=1)..."
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/systemd/logind.conf.d/10-sheng-inhibit.conf" \
+        "$rootdir/etc/systemd/logind.conf.d/10-sheng-inhibit.conf"
+    echo "   logind 挂起等待已设为 1s（开机生效）"
 }
 
 # --- Extract once up front (so we can size the image to fit) -----------------
@@ -958,11 +1094,25 @@ for MODE in "${BOOTMODES[@]}"; do
         install_autobrightness "$ROOTDIR" "$USER_NAME" || echo "WARN: 自动亮度步骤返回非零，继续构建" >&2
     fi
 
+    # 6a-3. 「设置→显示器」亮度滑块桥接（brightness-ac <-> setPrimaryBrightness，双向）。
+    #       须在 setup_users 之后（要建用户级服务软链）。见 install_brightness_bridge
+    #       顶部注释。BRIGHTNESS_BRIDGE_ENV=0 可跳过。
+    if is_true "$BRIGHTNESS_BRIDGE_ENV"; then
+        install_brightness_bridge "$ROOTDIR" "$USER_NAME" || echo "WARN: 亮度滑块桥接步骤返回非零，继续构建" >&2
+    fi
+
     # 6a-4. 「设置→显示器→缩放屏幕」加 250%/275% 档（libdisplay.so 硬编码闸门
     #       3072/3840 -> 2560，本机面板 3048 宽否则只到 225%）。见 install_display_scale
     #       顶部注释。DISPLAY_SCALE_ENV=0 可跳过。
     if is_true "$DISPLAY_SCALE_ENV"; then
-        install_display_scale "$ROOTDIR" || echo "WARN: 缩放屏幕 250%/275% 档步骤返回非零，继续构建" >&2
+        install_display_scale "$ROOTDIR" || echo "WARN: 缩放屏幕 250% 步骤返回非零，继续构建" >&2
+    fi
+
+    # 6a-5. 面板背光引擎（UKUI 亮度值 -> 真实面板背光；配合 6c 把合成器软件亮度钉在
+    #       100 干掉滤镜）。须在 setup_users 之后（要建用户级服务软链）。
+    #       见 install_panel_brightness 顶部注释。PANEL_BRIGHTNESS_ENV=0 可跳过。
+    if is_true "$PANEL_BRIGHTNESS_ENV"; then
+        install_panel_brightness "$ROOTDIR" "$USER_NAME" || echo "WARN: 面板背光引擎步骤返回非零，继续构建" >&2
     fi
 
     # 6b. Fontconfig: pin the generic families to Noto so linglong/DTK apps don't
@@ -991,17 +1141,52 @@ for MODE in "${BOOTMODES[@]}"; do
 FONTCONF
     chown -R "${USER_NAME}:${USER_NAME}" "$_userfc"
 
-    # 6c. 亮度持久化：让合成器 gamma-manager 接管屏幕亮度，避免转屏/开机把亮度
-    #     重置成最亮。根因：openKylin 的 ukui-settings-daemon 只按"是否存在
-    #     /sys/class/backlight/*/brightness 节点"判断硬件背光可调，于是把唯一内屏
-    #     当笔记本内屏，每次输出重配置（转屏）都把合成器亮度拉满到 100；而本平板
-    #     upm 实际调不了该节点（CanSetBrightness=false）。补丁让
-    #     upmSupportAdjustBrightness() 返回 false（等价源码补丁见
-    #     docs/patches/ukui-settings-daemon-upmSupportAdjustBrightness.patch）。
-    #     BRIGHTNESS_FIX_ENV=0 可跳过。
+    # 6c. 亮度（两处，同一组件 ukui-settings-daemon）：
+    #     ① 让合成器 gamma-manager 接管屏幕亮度，避免转屏/开机把亮度重置成最亮。
+    #        根因：它只按“是否存在 /sys/class/backlight/*/brightness 节点”判断硬件背光可调，
+    #        于是把唯一内屏当笔记本内屏，每次输出重配置（转屏）都把合成器亮度拉满 100；
+    #        而本平板 upm 实际调不了该节点（CanSetBrightness=false）。→ 让
+    #        upmSupportAdjustBrightness() 返回 false。
+    #     ② 中性化合成器「软件亮度滤镜」：把 GmHelper 的 用户→合成器 映射
+    #        (normalize/denormalizeBrightness) 钉成常量 100（== 不减光）。合成器的软件
+    #        亮度是对像素相乘的滤镜，会压暗部（暗场景发灰）；现在亮度改由真实背光承担
+    #        （见 6a-5 的 sheng-panel-brightness 引擎）。滑块值仍由 daemon 持久化到
+    #        globalconf.ini 的 [color]（真机实测与合成器解耦），故钉 100 不影响用户值。
+    #     二进制补丁（等价源码补丁见 docs/patches/）；BRIGHTNESS_FIX_ENV=0 可跳过。
+    #     SHENG_COMPOSITOR_BRIGHTNESS 可改（默认 100）。
     if is_true "${BRIGHTNESS_FIX_ENV:-1}"; then
-        bash "$SCRIPT_DIR/tools/sheng-usd-brightness-fix.sh" "$ROOTDIR" \
+        SHENG_COMPOSITOR_BRIGHTNESS="${SHENG_COMPOSITOR_BRIGHTNESS:-100}" \
+            bash "$SCRIPT_DIR/tools/sheng-usd-brightness-fix.sh" "$ROOTDIR" \
             || echo "WARN: 亮度修复步骤返回非零，继续构建" >&2
+    fi
+
+    # 6d. （已废弃）不再把硬件背光钉死在固定值。现在面板背光本身由 sheng-panel-brightness
+    #     引擎按 UI 亮度值驱动（见 6a-5），合成器软件亮度被 6c 钉在 100。旧的固定背光
+    #     sheng-backlight-fixed.service 会与引擎抢背光，故不再安装/启用。
+
+    # 6e. 休眠时立即关背光（PrepareForSleep -> backlight off），消除"黑屏但背光
+    #     还亮"的空档。见 install_suspend_backlight 顶部注释。SUSPEND_BACKLIGHT_ENV=0 可跳过。
+    if is_true "$SUSPEND_BACKLIGHT_ENV"; then
+        install_suspend_backlight "$ROOTDIR" || echo "WARN: 休眠关背光步骤返回非零，继续构建" >&2
+    fi
+
+    # 6f. 缩短挂起等待窗口（logind InhibitDelayMaxSec=1s，原来默认 5s），让电源键
+    #     更快可用。见 install_logind_inhibit 顶部注释。INHIBIT_FIX_ENV=0 可跳过。
+    if is_true "$INHIBIT_FIX_ENV"; then
+        install_logind_inhibit "$ROOTDIR" || echo "WARN: logind 挂起等待步骤返回非零，继续构建" >&2
+    fi
+
+    # 6g. 电源键"关闭显示器"：给控制中心「设置→电源→按下电源键时执行」下拉加「关闭显示器」
+    #     项（libpower.so），并让 ukui-settings-daemon 的 media-keys 处理 power 键时，
+    #     当 button-power=blank 就切换面板背光（libmedia-keys.so + sheng-pwrkey 包装脚本 +
+    #     sheng-screen-toggle）。见 tools/sheng-power-button-blank-fix.sh 顶部注释。
+    #     POWER_BLANK_ENV=0 可跳过。
+    if is_true "${POWER_BLANK_ENV:-1}"; then
+        bash "$SCRIPT_DIR/tools/sheng-power-button-blank-fix.sh" "$ROOTDIR" \
+            || echo "WARN: 电源键关闭显示器步骤返回非零，继续构建" >&2
+        chmod 0755 "$ROOTDIR/usr/bin/sheng-pwrkey" \
+                   "$ROOTDIR/usr/local/bin/sheng-screen-toggle" \
+                   "$ROOTDIR/usr/local/bin/sheng-idle-lock" 2>/dev/null || true
     fi
 
     echo "${SYSTEM_HOSTNAME}" > "$ROOTDIR/etc/hostname"

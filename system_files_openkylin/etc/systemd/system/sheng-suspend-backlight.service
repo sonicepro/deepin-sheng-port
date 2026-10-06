@@ -1,0 +1,14 @@
+[Unit]
+Description=Sheng suspend backlight (cut panel backlight at PrepareForSleep, restore on resume)
+Documentation=https://github.com/sonicepro/deepin-sheng-port
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/sheng-suspend-backlight
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

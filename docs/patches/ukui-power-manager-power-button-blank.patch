@@ -1,0 +1,21 @@
+ukui-power-manager: add a working "关闭显示器" (Blank) item to the power-key dropdown
+
+The control center "设置 → 电源 → 按下电源键时执行" combo is built in
+Power::setupComponent() (power/power.cpp), and its option list is hard-coded to
+Interactive / Shutdown / Suspend / Hibernate — there is no "blank" entry, even
+though the gsettings enum (org.ukui.power-manager button-power) and the
+ukui-framework-dbus PowerButtonAction property already accept "blank".
+
+The shipped fix (tools/sheng-power-button-blank-fix.sh) applies this change by
+binary-patching the compiled libpower.so (repurposing the dead hibernate branch
+— sheng has no hibernation).  This is the equivalent source change.
+
+--- a/power/power.cpp
++++ b/power/power.cpp
+@@ -751,6 +751,7 @@ void Power::setupComponent()
+     buttonStringList << tr("Interactive") << tr("Shutdown") << tr("Suspend") << tr("Hibernate");
+     mPowerKeyComboBox->insertItem(0, buttonStringList.at(0), "interactive");
+     mPowerKeyComboBox->insertItem(1, buttonStringList.at(1), "shutdown");
+     if (m_isExistSuspend) mPowerKeyComboBox->insertItem(2, buttonStringList.at(2), "suspend");
+     if (m_isExistHibernate) mPowerKeyComboBox->insertItem(3, buttonStringList.at(3), "hibernate");
++    mPowerKeyComboBox->insertItem(mPowerKeyComboBox->count(), tr("Blank"), "blank");   // sheng: 关闭/打开显示器

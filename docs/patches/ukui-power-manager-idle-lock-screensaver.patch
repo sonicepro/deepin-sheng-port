@@ -1,0 +1,40 @@
+ukui-power-manager: lock the screen on the (timed) idle blank
+
+Bug (verified on sheng): the "此时间段后关闭显示器" (idle) blank turns the panel
+off but never locks — so with "唤醒屏幕时需要密码" (org.ukui.screensaver
+close-activation-enabled) on, waking a timed-blank screen did NOT ask for the
+password (whereas the power-key "关闭显示器" action does).
+
+Root cause: PowerManagementDaemon/idle/idlenesswatcher.cpp's IdlenessWatchcer runs
+its lock step as
+
+    QProcess process;
+    process.start("ukui-screensaver-command -b idle");   // <-- wrong
+    process.waitForFinished();
+
+but Qt's QProcess::start(const QString &program) does NOT split on spaces — it
+tries to exec a file literally named "ukui-screensaver-command -b idle", which
+does not exist, so the process fails to start (QProcess::FailedToStart) and the
+lock never happens.  (The blank itself uses system("... kscreen-doctor --dpms
+off"), which DOES go through a shell, so it works — hence "blanks but no lock".)
+
+The shipped fix (tools/sheng-power-button-blank-fix.sh, PART 3) repoints that
+program string to the no-space wrapper /usr/local/bin/sheng-idle-lock, which runs
+`ukui-screensaver-command --lock` when close-activation-enabled is on (immediate
+lock; `-b idle` only locked after a few seconds).  This is the equivalent source
+change (pass program + args properly, and lock immediately):
+
+--- a/PowerManagementDaemon/idle/idlenesswatcher.cpp
++++ b/PowerManagementDaemon/idle/idlenesswatcher.cpp
+@@ (mTurnOffDisplayTimer timeout lambda, initIdleWatcher)
+         turnOffDisplay();
+         turnOffDisplaySignal(true);
+ 
+         QProcess process;
+-        process.start("ukui-screensaver-command -b idle");
++        // sheng: lock immediately (ask for password on wake) iff configured.
++        if (QGSettings("org.ukui.screensaver").get("close-activation-enabled").toBool())
++            process.start("ukui-screensaver-command", QStringList{ "--lock" });
+         process.waitForFinished();
+         mTurnOffDisplayTimer->stop();
+     });

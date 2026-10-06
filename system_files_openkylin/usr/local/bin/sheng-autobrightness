@@ -21,6 +21,9 @@
 # nor on its built-in debug-lux sweep. So we drive brightness ourselves via
 # the settings-daemon Brightness interface, which does work here.
 #
+# Brightness is debounced so fast light changes do not make the panel strobe:
+# see SETTLE / DEADBAND / MIN_INTERVAL below.
+#
 # Runs as the desktop user (luser) so it can talk to the session bus. The
 # light sensor data path touches /dev/fastrpc-adsp, made readable by the
 # `luser` group via /etc/udev/rules.d/70-sheng-fastrpc.rules.
@@ -57,10 +60,26 @@ CURVE = [
     (10000.0, 100.0), # direct sun
 ]
 
-EMA_ALPHA = 0.5        # light smoothing (1.0 = no smoothing)
-DEADBAND = 3           # only re-apply when target moved >= this many percent
-MIN_INTERVAL = 2.0     # seconds between brightness writes
-TOGGLE_POLL = 1.0      # seconds between toggle re-checks
+def _envf(name, default):
+    """Float from the environment, falling back to `default` if unset/invalid."""
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+# Debounce knobs. A lux change never moves the screen directly: once the target
+# leaves DEADBAND, brightness is held until the target has stayed put (within
+# +/-SETTLE_EPS) for SETTLE seconds, and then written at most once per
+# MIN_INTERVAL. Fast flicker (strobing lamps, passing shadows) keeps resetting the
+# settle window, so the panel does not strobe. All values are overridable via the
+# SHENG_AUTOBRIGHTNESS_* env vars (e.g. a systemd drop-in) without rebuilding.
+EMA_ALPHA = _envf("SHENG_AUTOBRIGHTNESS_EMA", 0.45)             # light smoothing (1.0 = none)
+DEADBAND = _envf("SHENG_AUTOBRIGHTNESS_DEADBAND", 3)           # min % move to react at all
+MIN_INTERVAL = _envf("SHENG_AUTOBRIGHTNESS_MIN_INTERVAL", 2.5) # min seconds between writes
+SETTLE = _envf("SHENG_AUTOBRIGHTNESS_SETTLE", 2.5)             # seconds a demand must hold to apply
+SETTLE_EPS = _envf("SHENG_AUTOBRIGHTNESS_SETTLE_EPS", 2)       # +/-% band that counts as held
+TOGGLE_POLL = _envf("SHENG_AUTOBRIGHTNESS_TOGGLE_POLL", 1.0)   # seconds between toggle re-checks
 
 
 def warn(msg):
@@ -144,6 +163,8 @@ def main():
     ema = None
     last_applied = None
     last_apply_t = 0.0
+    pending_pct = None
+    pending_t = 0.0
     enabled = None
 
     while True:
@@ -196,22 +217,34 @@ def main():
         new_enabled = gs_get_bool(ENABLE_KEY)
         if new_enabled is not None:
             if new_enabled and not enabled:
-                last_applied = None  # force an immediate apply on off->on
+                last_applied = None   # force a fresh apply on off->on
+                pending_pct = None
                 if debug:
                     warn("toggle ON")
-            elif enabled and not new_enabled and debug:
-                warn("toggle OFF")
+            elif enabled and not new_enabled:
+                pending_pct = None    # drop any pending change while off
+                if debug:
+                    warn("toggle OFF")
             enabled = new_enabled
 
         if enabled and ema is not None:
             pct = lux_to_pct(ema)
             now = time.time()
-            if last_applied is None or (
-                    abs(pct - last_applied) >= DEADBAND and
-                    now - last_apply_t >= MIN_INTERVAL):
+            if last_applied is not None and abs(pct - last_applied) < DEADBAND:
+                # Back within the deadband of what is on screen -> drop any
+                # pending change (the light drifted back).
+                pending_pct = None
+            elif pending_pct is None or abs(pct - pending_pct) > SETTLE_EPS:
+                # New / newly-moved demand: (re)start the settle window. Do not
+                # touch brightness yet -- wait for the target to hold steady.
+                pending_pct = pct
+                pending_t = now
+            elif now - pending_t >= SETTLE and now - last_apply_t >= MIN_INTERVAL:
+                # Held steady for SETTLE seconds -> apply once.
                 if set_brightness(pct):
                     last_applied = pct
                     last_apply_t = now
+                    pending_pct = None
                     if debug:
                         warn("SET brightness %d%%" % pct)
 

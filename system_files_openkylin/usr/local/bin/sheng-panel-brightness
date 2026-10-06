@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+# sheng-panel-brightness
+# ---------------------------------------------------------------------------
+# Xiaomi Pad 6S Pro (sheng) / openKylin 3.0: drive the REAL panel backlight from
+# UKUI's brightness value.
+#
+# Why: UKUI's brightness stack (ukui-settings-daemon gamma-manager) applies the
+# slider value as a *compositor software brightness* -- a per-pixel multiply in
+# kylin-wlcom.  That "filter" crushes dark tones and looks bad.  We instead let
+# the panel backlight (/sys/class/backlight/ktz8866-backlight) carry the
+# brightness; the compositor software brightness is neutralised separately
+# (GmHelper::normalizeBrightness patched to a constant 100 -- see
+# tools/sheng-usd-brightness-fix.sh).
+#
+# How the value reaches us: every brightness UI path -- the quick-settings /
+# sidebar slider, the control-center "Display" slider (via the
+# sheng-brightness-ac-bridge), and sheng-autobrightness -- funnels through
+# ukui-settings-daemon, which persists the user value (0..100) in
+#
+#     /etc/ukui/usd/globalconf.ini   ->   [color]  <output> = <0..100>
+#
+# Verified on device: this config value is the faithful user value and is NOT
+# coupled to the compositor brightness, so it is a stable control channel.
+# This daemon watches that file and maps the value onto the backlight node.
+#
+# Runs as the desktop user (luser); the backlight node is group-/user-writable
+# here (see the 70-hide-small-partitions / backlight udev rules).
+# ---------------------------------------------------------------------------
+import os
+import re
+import sys
+import time
+
+CONF = os.environ.get("SHENG_BRIGHT_CONF", "/etc/ukui/usd/globalconf.ini")
+BACKLIGHT = os.environ.get("SHENG_BACKLIGHT_NODE", "/sys/class/backlight/ktz8866-backlight")
+
+# Backlight range for the slider 0..100 (perceptual-ish: linear in %).
+# BL_MAX == the node max -> top of the slider is the true panel maximum.
+def _envf(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+BL_MIN = int(_envf("SHENG_BACKLIGHT_MIN", 15))    # darkest slider step
+BL_MAX = int(_envf("SHENG_BACKLIGHT_MAX", 2047))  # brightest slider step (== node max)
+POLL = _envf("SHENG_BRIGHT_POLL", 0.25)           # seconds between config checks
+
+DEBUG = "--debug" in sys.argv or bool(os.environ.get("SHENG_BRIGHT_DEBUG"))
+
+
+def warn(msg):
+    sys.stderr.write("sheng-panel-brightness: %s\n" % msg)
+    sys.stderr.flush()
+
+
+def read_config_value():
+    """Return the [color] <output> value (0..100) from the UKUI config, or None."""
+    try:
+        with open(CONF) as f:
+            section = None
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith(("#", ";")):
+                    continue
+                if s.startswith("[") and s.endswith("]"):
+                    section = s[1:-1].strip()
+                    continue
+                if section != "color" or "=" not in s:
+                    continue
+                k, _, v = s.partition("=")
+                m = re.search(r"-?\d+(?:\.\d+)?", v)
+                if m:
+                    return int(round(float(m.group(0))))
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        warn("read %s failed: %s" % (CONF, e))
+        return None
+    return None
+
+
+def value_to_level(v):
+    v = max(0, min(100, int(v)))
+    if v <= 0:
+        return BL_MIN
+    return int(round(BL_MIN + (BL_MAX - BL_MIN) * (v / 100.0)))
+
+
+def write_level(level):
+    try:
+        with open(BACKLIGHT + "/brightness", "w") as f:
+            f.write(str(int(level)))
+        return True
+    except Exception as e:
+        warn("write backlight=%s failed: %s" % (level, e))
+        return False
+
+
+def main():
+    warn("started (pid %d) conf=%s node=%s range=%d..%d%s" % (
+        os.getpid(), CONF, BACKLIGHT, BL_MIN, BL_MAX, " [debug]" if DEBUG else ""))
+    last_v = None
+    last_mtime = None
+    while True:
+        try:
+            mtime = os.stat(CONF).st_mtime
+        except OSError:
+            mtime = None
+        if mtime != last_mtime or last_v is None:
+            last_mtime = mtime
+            v = read_config_value()
+            if v is not None and v != last_v:
+                lvl = value_to_level(v)
+                if write_level(lvl):
+                    if DEBUG or last_v is not None:
+                        warn("brightness %d%% -> backlight %d" % (v, lvl))
+                    last_v = v
+        time.sleep(POLL)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

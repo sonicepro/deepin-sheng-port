@@ -1,0 +1,21 @@
+#!/bin/bash
+# sheng-idle-lock
+# ---------------------------------------------------------------------------
+# ukui-powermanagement's IdlenessWatcher intends to run
+#     ukui-screensaver-command -b idle
+# when the display is turned off on idle (so waking it asks for the password),
+# but it does `QProcess::start("ukui-screensaver-command -b idle")` — and Qt's
+# QProcess::start(program) does NOT split on spaces, so it tries to exec a file
+# literally named "ukui-screensaver-command -b idle" -> FailedToStart -> the
+# timed blank never locks (while the power-key blank does).
+#
+# tools/sheng-power-button-blank-fix.sh repoints that string to this (no-space)
+# path.  We run the intended command, but only when "唤醒屏幕时需要密码"
+# (org.ukui.screensaver close-activation-enabled) is on, so the timed blank
+# matches the power key.  `--lock` (immediate) instead of `-b idle` because the
+# latter only locks after a few seconds ("delay to lock"), letting a quick wake
+# skip the password.
+# ---------------------------------------------------------------------------
+if [ "$(gsettings get org.ukui.screensaver close-activation-enabled 2>/dev/null)" = "true" ]; then
+    exec /usr/bin/ukui-screensaver-command --lock
+fi

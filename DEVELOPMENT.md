@@ -147,42 +147,129 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
   `debug-lux`（`debug-mode=true` 后扫 `debug-lux`）亮度都纹丝不动。故障在编译好的二进制内部，故改用
   自带守护进程。
 - **`sheng-autobrightness` 守护进程**：跑 `ssccli --sensor light` 读 lux → EMA 平滑 → 分段对数曲线
-  映射为亮度百分比（约暗 15% … 强光 100%）→ `dbus-send` 调 `setPrimaryBrightness`（输出死区 ≥3%、
-  写入间隔 ≥2s 防抖）。**以 `luser` 跑**（session bus 只认 uid 1000）。
+  映射为亮度百分比（约暗 15% … 强光 100%）→ `dbus-send` 调 `setPrimaryBrightness`。**防抖**：目标
+  变化后要**稳定保持 ≥2.5s**（`SETTLE`）才真正写亮度，另有输出死区（≥3%）与写入间隔（≥2.5s）；快速
+  光线抖动（闪烁灯管/掠过阴影）会不断重置稳定窗口，故屏幕不闪。数值可用环境变量
+  `SHENG_AUTOBRIGHTNESS_{EMA,DEADBAND,MIN_INTERVAL,SETTLE,SETTLE_EPS}` 覆盖，无需重编镜像。
+  **以 `luser` 跑**（session bus 只认 uid 1000）。
+  该值最终经 `globalconf.ini [color]` 由 **`sheng-panel-brightness` 引擎落到真实背光**（见「屏幕亮度
+  = 真实背光」），不再是合成器软件亮度。
 - 落地文件：`system_files_openkylin/usr/local/bin/sheng-autobrightness`、
   `system_files_openkylin/etc/systemd/user/sheng-autobrightness.service`（enable 软链由构建为用户建）。
 
 > 与自带插件可能“双重控制”：本守护进程默认生效、而自带插件默认 `active=false`（不加装它）。
 > 若日后用户手动把插件 `active` 打开、且它在新环境里又能工作，可能两者抢亮度，届时二选一。
 
-### openKylin 3.0：亮度持久化（转屏/重启不回到最亮）
+### openKylin 3.0：屏幕亮度 = 真实背光（干掉合成器软件亮度「滤镜」）
 
-构建步骤 **6c（开关 `BRIGHTNESS_FIX_ENV`，默认开）** 给 `ukui-settings-daemon` 打补丁，
-让"转屏/重启后屏幕亮度回到最亮"消失。
+构建步骤 **6c（开关 `BRIGHTNESS_FIX_ENV`，默认开）** 给 `ukui-settings-daemon` 打补丁，步骤
+**6a-5（开关 `PANEL_BRIGHTNESS_ENV`，默认开）** 落地背光引擎。两者配合：屏幕亮度全部由**真实
+面板背光**承担，彻底不再用合成器「软件亮度」——它对像素做乘法（`color *= brightness`），是压暗部、
+让暗场景发灰的**滤镜**。
 
 - **亮度控制是谁**：快捷操作条（`ukui-sidebar` 的 `libbrightness-shortcut.so`）、设置→显示器
-  （`ukui-control-center` 的 `libdisplay.so`）、托盘都走会话 D-Bus `org.ukui.SettingsDaemon`
-  对象 `/GlobalBrightness` 的 `setPrimaryBrightness`（即 `ukui-settings-daemon` 的 gamma-manager）
-  → 下发合成器软件亮度 `com.kylin.Wlcom.Output.SetBrightness`。用户值存
-  `/etc/ukui/usd/globalconf.ini` 的 `[color] <output>=<0..100>`（映射 `合成器值 = 30 + 值×0.7`）。
-- **根因**：`UsdBaseClass::upmSupportAdjustBrightness()` 只判断
+  （`ukui-control-center` 的 `libdisplay.so`，经本仓库「亮度滑块桥接」）、托盘、自动亮度都走会话
+  D-Bus `org.ukui.SettingsDaemon` 对象 `/GlobalBrightness` 的 `setPrimaryBrightness(u)`（即
+  `ukui-settings-daemon` 的 gamma-manager）。它把用户值(0..100)持久化到
+  `/etc/ukui/usd/globalconf.ini` 的 `[color] <output>=<v>`，并下发合成器软件亮度。
+- **真机验证的关键事实**：`globalconf.ini [color]` 的值是**忠实的用户值**，且与合成器亮度**解耦**
+  ——把合成器 `com.kylin.Wlcom.Output.SetBrightness` 直接钉到任意值（如 100），该 config 与
+  `getPrimaryBrightness` **都不变**。所以它是稳定的控制通道（这正是一切设计的基础）。
+- **根因①（转屏/重启回最亮）**：`UsdBaseClass::upmSupportAdjustBrightness()` 只判断
   `/sys/class/backlight/*/brightness` 是否存在 → 本平板有 `ktz8866-backlight` → 返回 true →
   gamma-manager 把**唯一内屏**当"笔记本内屏"，在 `GmHelper::updateWlcomOutputInfo()` 里
   `targetBrightness=100`，**每次输出重配置（转屏）和会话启动**都拉满。而 upm 其实调不了该节点
-  （`org.ukui.powermanagement.CanSetBrightness=false`）。实测：冻结 `ukui-settings-daemon` 后用
-  `kscreen-doctor` 转屏，合成器亮度**保持不变** → 重置 100% 来自该 daemon。
-- **修法**：让 `upmSupportAdjustBrightness()` 在 upm 调不了背光时返回 false → 改由 gamma-manager
-  管亮度（其值会持久化并按 config 恢复）。源码补丁见
-  `docs/patches/ukui-settings-daemon-upmSupportAdjustBrightness.patch`。
-- **落地方式**：openKylin 仓库版本错位（`libxrandr-dev` 1.5.2 依赖 `libxrandr2` 1.5.2，但设备装的是
-  1.5.4）导致**在设备上源码编译 ukui-settings-daemon 失败**，故 `tools/sheng-usd-brightness-fix.sh`
-  直接对**已编译**的该函数打机器码补丁（`mov w0,#0; ret`）：**daemon 主程序
-  `/usr/bin/ukui-settings-daemon` + 每个导出该符号的插件 `.so`**（各插件静态链了
-  `common/usd_base_class.cpp`，且该符号会被 interpose，所以主程序里那份往往才是实际被调用的）。
-  脚本用 `nm -DC` 找符号、`readelf -SW` 把 vaddr 换算成文件偏移，**与构建机架构无关**（只读 arm64
-  ELF 字节，x86 构建机也能跑）。⚠️ **在对这些文件写入前必须先停掉 `ukui-settings-daemon`**，
-  否则会因 mmap 重取页而 SIGBUS（实测 core dump）。
-- 验证：`setPrimaryBrightness 30` → 合成器 `brightness=51`；转屏 → 仍 51；重启 sd → 仍 51（不再 100）。
+  （`org.ukui.powermanagement.CanSetBrightness=false`）。→ 让该函数返回 false（`mov w0,#0; ret`）。
+  源码补丁见 `docs/patches/ukui-settings-daemon-upmSupportAdjustBrightness.patch`。
+- **根因②（滤镜）**：gamma-manager 把用户值经 `GmHelper::normalizeBrightness` 映射后下发合成器
+  `SetBrightness`，合成器对像素做乘法 → 滤镜。→ 把 `normalizeBrightness` / `denormalizeBrightness`
+  两个函数体钉成**常量 100**（`mov w0,#100; ret`，`SHENG_COMPOSITOR_BRIGHTNESS` 可改）→ 合成器
+  永远 100（=不减光）= **无滤镜**。（原本映射是 `30 + user×0.7`。）
+- **背光引擎 `sheng-panel-brightness`**（`system_files_openkylin/usr/local/bin/sheng-panel-brightness`
+  + 用户级服务）：监视 `globalconf.ini` 的 `[color] <output>` 值 → 线性映射写入
+  `/sys/class/backlight/ktz8866-backlight/brightness`（`level = BL_MIN + (BL_MAX−BL_MIN)×v/100`，
+  默认 `BL_MIN=15`、`BL_MAX=2047`，可用 `SHENG_BACKLIGHT_MIN/MAX` 覆盖）。这样三条 UI 路径一起
+  驱动真实背光。**以 `luser` 跑**（该节点本机对 `luser` 可写）。
+- **落地方式**：`tools/sheng-usd-brightness-fix.sh` 对**已编译**的二进制打机器码补丁（openKylin
+  仓库版本错位——`libxrandr-dev` 1.5.2 vs 设备 1.5.4——导致设备上源码编译 `ukui-settings-daemon`
+  失败）：用 `nm -DC` 找符号、`readelf -SW` 把 vaddr 换算成文件偏移，只读 arm64 ELF 字节，x86
+  构建机也能跑；`upmSupportAdjustBrightness` 在 **daemon 主程序 + 每个导出该符号的插件 `.so`**（符号
+  会被 interpose）各打一份。⚠️ **写这些文件前必须先停掉 `ukui-settings-daemon`**，否则 mmap 重取页
+  → SIGBUS（实测 core dump）。
+- **废弃**：旧的 `sheng-backlight-fixed.service`（开机把背光钉死 1800）**已移除**——它会和新引擎抢
+  背光。背光现在由引擎按 UI 值驱动；`sheng-suspend-backlight` 仍在挂起/恢复时关/还原背光（与引擎
+  兼容：恢复回引擎当前值）。
+- 验证（真机）：`setPrimaryBrightness 30/8/70/100` → config 同步 `30/8/70/100`，背光
+  `828/177/1437/2047`；`gsettings set org.ukui.power-manager brightness-ac 30` → 背光 625。合成器
+  `brightness` 恒 100（`busctl --user call com.kylin.Wlcom /com/kylin/Wlcom/Output
+  com.kylin.Wlcom.Output ListAllOutputs` 可见）。
+
+### openKylin 3.0：「设置 → 显示器」亮度滑块（拖动无效 → 桥接）
+
+控制中心**「设置 → 显示器」页**的亮度滑块真机拖动无反应（**侧栏/快捷中心/托盘都正常**）。实机 + 反汇编定位：
+
+- 该滑块是 `ukui-control-center` 的 `libdisplay.so`。走哪条路由 `Widget::isSetGammaBrightness()` 决定，**本机恒为 `false`**：upm（`org.ukui.powermanagement`）在注册但 `CanSetBrightness=false`、DMI 产品名既非 `VAH510` 也非 `all in one`、schema 里没有 `gammaforbrightness` 键。→ 滑块**只写 gsettings `org.ukui.power-manager brightness-ac`**（硬件背光路），**一次都不调**能用的 `setPrimaryBrightness`（gamma 路）。抓包实证：拖动只产生一串 `ca.desrt.dconf.Write … /org/ukui/power-manager/brightness-ac`，无任何 `org.ukui.SettingsDaemon`/合成器调用。
+- `brightness-ac` 的落地点是 **upm 硬件背光**（写它会触发 `org.ukui.powermanagement.RegulateBrightness`），而本机 upm 驱动不了 `ktz8866`（`RegulateBrightness` 返回 `"no effective node"`，`CanSetBrightness=false`）→ **拖动无效**。
+- 侧栏/快捷中心直接调 `org.ukui.SettingsDaemon /GlobalBrightness` 的 `setPrimaryBrightness` → gamma-manager → 合成器 `SetBrightness` → 正常。这也是本滑块要接上的目标路径。
+
+**修法（构建步骤 6a-3，开关 `BRIGHTNESS_BRIDGE_ENV`，默认开）**：加用户级守护 `sheng-brightness-ac-bridge`，**双向**同步 —— `brightness-ac` 变化 → `setPrimaryBrightness(uint32)`（滑块能真正改亮度）；当前亮度 → 回写 `brightness-ac`（滑块位置反映真实亮度，即"监听当前亮度"）。**不碰任何二进制**。落地文件：`system_files_openkylin/usr/local/bin/sheng-brightness-ac-bridge`、`etc/systemd/user/sheng-brightness-ac-bridge.service`（enable 软链由构建为用户建）。
+- 守护**不在启动时主动施加**（`brightness-ac` 默认 `100.0`，登录时施加会把亮度顶满）；反向同步在 `brightness-ac` 连续变化（拖动）时被抑制、并有 ±3 容差，不会和拖动打架。
+
+> ⚠️ 更正：早前（记忆 `sheng-brightness-reset-fix`）把「设置→显示器」也归为走 `setPrimaryBrightness` 是**错的**——实测它写的是 `brightness-ac`，正因如此才需要本桥接。
+
+### openKylin 3.0：休眠时立即关背光（消除"黑屏但背光还亮"）
+
+点「休眠」后会先出现一小段"**屏幕已黑、但背光还亮**"，过一会背光才灭。真机定位（logind + 合成器 + 驱动时序）：
+
+- logind 收到休眠请求**先发 `PrepareForSleep(true)`** → 合成器 `kylin-wlcom`（有 `PrepareForSleep`/`PrepareForSuspend`/`Power off outputs` 字样）**立即关输出**（画面黑）——**不动背光**。
+- 之后 logind 要**等一批 `delay` inhibitor 放行**（实测挂着的：`Screen Locker`/`Screen Locker Backend`、`kylin-process-manager`（Process Manager Idle）、`qq`（×2）、`NetworkManager`、`UPower`），才真正让内核进 `PM: suspend entry (s2idle)`。
+- **背光是在内核 suspend 时才由 DSI 面板 + `ktz8866` 驱动一起切断的**；中间那段 = 等 inhibitor 的时间。系统里**没有任何 sleep hook 写 `/sys/class/backlight`**（`systemd-sleep` 下只有 `hdparm`）。
+
+**修法（构建步骤 6e，开关 `SUSPEND_BACKLIGHT_ENV`，默认开）**：系统级守护 `sheng-suspend-backlight` 监听系统总线 logind 的 `PrepareForSleep`：收到 `true` 立刻把背光写 `0`（保存原值），收到 `false`（恢复/取消）还原。落地文件：`system_files_openkylin/usr/local/sbin/sheng-suspend-backlight`、`etc/systemd/system/sheng-suspend-backlight.service`（构建 enable）。真机验证：`busctl --system emit /org/freedesktop/login1 org.freedesktop.login1.Manager PrepareForSleep b true/false` → 背光 `1800→0→1800` ✅。
+
+> 注：当前挂着 `ukui-powermanagement` 的 `block handle-lid-switch`（合盖被禁），此服务对**手动休眠/电源键**生效。
+
+> 另：**logind `InhibitDelayMaxSec`（默认 5s）** 会放大"屏幕灭 → 真正睡"的窗口——它要等 `kylin-process-manager` 的 sleep delay 锁放行（实测放到超时才放）。构建步骤 **6f**（开关 `INHIBIT_FIX_ENV`）装 logind drop-in `/etc/systemd/logind.conf.d/10-sheng-inhibit.conf` 把 `InhibitDelayMaxSec` 设为 **1s**。⚠️ **改它别在运行中 `systemctl restart systemd-logind`**（会打断图形会话、掉到控制台）；开机生效即可。（注：suspend→resume 本身仍有 s2idle 往返开销，这步只去掉可避免的"挂起前等待"。）
+
+### openKylin 3.0：电源键「关闭显示器」（下拉加项 + 真正关屏）
+
+控制中心「设置 → 电源 → 按下电源键时执行」下拉**原本没有「关闭显示器」**。构建步骤 **6g（开关
+`POWER_BLANK_ENV`，默认开；脚本 `tools/sheng-power-button-blank-fix.sh`）** 把它补齐。这是**两条链**（真机逐一验证）：
+
+- **下拉列表写死在控制中心电源插件**：插件是 `ukui-power-manager` 包的
+  `usr/lib/aarch64-linux-gnu/ukui-control-center/libpower.so`（dpkg 已把它 divert 覆盖 `ukui-control-center` 自带的那份）。
+  `Power::setupComponent()` 的选项**硬编码**为 Interactive / Shutdown / Suspend / Hibernate —— 没有 `blank`。
+  而 gsettings enum（`org.ukui.power-manager button-power`）与 `ukui-framework-dbus` 的属性
+  `org.ukui.Framework.Devices.Power.PowerButtonAction` **本就接受 `blank`**，合成器 `kylin-wlcom` 也实现了 KDE
+  DPMS 协议（`kscreen-doctor -d off/on` 有效）。→ 只是**下拉漏了该项**。
+- **真正处理电源键的是 `ukui-settings-daemon` 的 media-keys 插件**
+  （`usr/lib/aarch64-linux-gnu/ukui-settings-daemon/libmedia-keys.so`）：`MediaKeyAction::doPowerKeyAction()`
+  读 `button-power` 的 **enum 下标**再调 `doSessionAction(PowerType)`。`PowerType`（`media-type.h`）只定义了
+  `{POWER_SUSPEND=1, POWER_SHUTDOWN=2, POWER_HIBERNATE=3, POWER_INTER_ACTIVE=4}` —— **没有 0**，于是
+  `blank`（enum 0）在 `doSessionAction` 的 switch 里**无 case**、落到 `executeCommand("ukui-session-tools", {})`
+  → 只弹「询问」会话菜单（这就是"选了关闭显示器、按键还是询问"的原因）。
+- **修法**（对**已编译**文件打补丁，无需重编；源码等价补丁见 `docs/patches/`）：
+  1. **`libpower.so`**：下拉追加 `tr("Blank")`/`"blank"`。因 openKylin 归档的 -dev 包与设备已装的**新版 X/GL 库版本冲突**
+     （`libxrandr2` 1.5.4 vs 1.5.2 等）、**装不上构建依赖**，改为**复用本机永不执行的 hibernate 分支**（sheng 无休眠，
+     `/sys/power/state == "freeze mem"`）：该分支跳转改 NOP、QVariant 数据 `"hibernate"→"blank"`、标签
+     `tr("Hibernate")→tr("Blank")`（`Blank`→「关闭显示器」的中文翻译已存在）。3 处各 4 字节。
+  2. **`libmedia-keys.so`**：`doSessionAction` 里那个程序字符串 `"ukui-session-tools"`（**全文件仅此一处引用**）改成
+     `"sheng-pwrkey"`（等长、零填充）。控制中心/面板用各自副本，不受影响。
+  3. 覆盖层落两个脚本：`/usr/bin/sheng-pwrkey`（收到**无参**调用且 `button-power=blank` → 调 `sheng-screen-toggle`；
+     否则 `exec ukui-session-tools "$@"` 原样透传 suspend/shutdown/hibernate/interactive）、
+     `/usr/local/bin/sheng-screen-toggle`（用状态文件 `/run/user/<uid>/sheng-panel-off` 切换 `kscreen-doctor -d off/on`）。
+     ⚠️ **关屏必须等电源键"松开"再 `-d off`**：`kscreen-doctor -d off` 是合成器级 DPMS，`kylin-wlcom` 会在
+     **触发它的那次按键输入**上立刻"醒来"重新点亮 —— 立即关屏会瞬间又亮（实测"黑一下马上亮"）。**不能用固定延时**
+     （延时要 ≥ 用户按住时长，按得越久越慢，没法两全）。故 `sheng-screen-toggle` 读 `pmic_pwrkey` 的 evdev
+     （`luser∈input` 组，`/dev/input/event0`；`EVIOCGKEY` 查当前是否按住、是则等 `KEY_POWER` 松开，最多 3s），
+     **你松手的那一刻就关屏**。下次按键时状态文件存在 → 合成器自己唤醒 + 我们补一发 `-d on`（空操作）→ 亮屏并删状态文件。
+- ⚠️ **打 `libmedia-keys.so` 补丁后需重启 `ukui-settings-daemon`**（它**没有 systemd 用户单元**，是会话 autostart：
+  `pkill -f /usr/bin/ukui-settings-daemon` 后用会话环境重启）才生效。
+- ⚠️ **与自动转屏互斥**：`set_rotation`（`com.kylin.statusmanager.interface`）会做一次**输出重配置**，`kylin-wlcom` 会把它当成"活动"而把刚熄的屏**又点亮**（手持、非平放时才会转屏，故只在按电源键熄屏时撞见）。修法：`sheng-autorotate` 在熄屏期间（`/run/user/<uid>/sheng-panel-off` 存在，即 `sheng-screen-toggle` 建的那个）**跳过转屏**，屏亮后若朝向变了再补转（见 `system_files_openkylin/usr/local/bin/sheng-autorotate`）。注意 `org.ukui.ScreenSaver.GetBlankState` **不**反映 `kscreen-doctor` 的 DPMS、`/sys/class/drm/*/dpms` 也不变，所以用我们自己的状态文件最稳。
+- **（顺带）"到点自动关屏"也要锁屏**：`ukui-powermanagement` 的 IdleWatcher 在到点关屏时本应执行 `ukui-screensaver-command -b idle`（锁屏），但它写成 `QProcess process; process.start("ukui-screensaver-command -b idle")` —— Qt 的 `QProcess::start(program)` **不按空格切分**（与 `system()` 不同），于是去执行一个**名字含空格**的"可执行文件"→ `FailedToStart` → **到点关屏从不锁屏**（只有电源键那条会锁）。构建步骤 6g 的 PART 3 把该程序串（`ukui-powermanagement` 内，唯一一处）改成无空格路径 `/usr/local/bin/sheng-idle-lock`；该包装脚本在 `close-activation-enabled` 为真时执行 `ukui-screensaver-command --lock`（**立即锁**；`-b idle` 是"延时锁屏"，刚熄灭马上点亮会免密）。落地文件 `system_files_openkylin/usr/local/bin/sheng-idle-lock`。⚠️ 打此补丁后需重启 `ukui-powermanagement`（会话 autostart；运行中改会 `ETXTBSY`，需先停掉、或改副本再 `mv`）。源码等价补丁见 `docs/patches/ukui-power-manager-idle-lock-screensaver.patch`。
+- 验证（实机）：下拉出现「关闭显示器」；选中后 `gsettings get … button-power` = `blank`、framework 属性 = `blank`；
+  触发媒体键的 `POWER_OFF_KEY`（`busctl --user call org.ukui.SettingsDaemon /org/ukui/SettingsDaemon/MediaKeys
+  org.ukui.SettingsDaemon.MediaKeys externalDoActionWithName ss POWER_OFF_KEY ''`）→ 屏灭（状态文件出现），再触发 → 屏亮。
 
 ### openKylin 3.0：指纹（FPC1553 / 电源键指纹）
 
@@ -222,8 +309,12 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 | **WiFi（ath12k WCN7850）** 起不来 | `fix_wifi_firmware`：`board-2.bin` → `board.bin` 伪装 |
 | **openKylin3：自动转屏不工作**（`ssccli` 报 `SSC QMI Service not found`；屏幕不跟随旋转） | 缺 `protection-domain-mapper`：装并 enable `pd-mapper` + `chmod 0755 /usr/bin/adsprpcd` + enable `adsprpcd-sensorspd`（挂 multi-user.target），并用 `sheng-autorotate` 直连 `ssccli` 调 `set_rotation`；见「openKylin 3.0：自动转屏」 |
 | **openKylin3：自动亮度开关打开但屏幕不随环境光变** | 自带 `libauto-brightness.so` 能读光感，但经内部 `BrightThread` 施加亮度在本机 Wayland/kylin-wlcom 上无效（开灯/关灯/`debug-lux` 扫值都不变）→ 改用自带的 `sheng-autobrightness`（`ssccli --sensor light` → `setPrimaryBrightness`，见「openKylin 3.0：自动亮度」） |
-| **openKylin3：转屏 / 重启把屏幕亮度重置成最亮** | `ukui-settings-daemon` 只按 `/sys/class/backlight/*/brightness` 节点是否存在就认定“硬件背光可调”，把唯一内屏当笔记本内屏，**每次输出重配置（转屏）都把合成器亮度拉满到 100**；本平板 upm 其实调不了该节点（`CanSetBrightness=false`）。打补丁让 `UsdBaseClass::upmSupportAdjustBrightness()` 返回 false（`tools/sheng-usd-brightness-fix.sh`，步骤 6c；等价源码补丁见 `docs/patches/`）→ 改由合成器 gamma-manager 管亮度（值存 `/etc/ukui/usd/globalconf.ini [color]`），转屏/开机即保留，且无闪屏。见「openKylin 3.0：亮度持久化」 |
+| **openKylin3：转屏 / 重启把屏幕亮度重置成最亮** | `ukui-settings-daemon` 只按 `/sys/class/backlight/*/brightness` 节点是否存在就认定“硬件背光可调”，把唯一内屏当笔记本内屏，**每次输出重配置（转屏）都把合成器亮度拉满到 100**；本平板 upm 其实调不了该节点（`CanSetBrightness=false`）。打补丁让 `UsdBaseClass::upmSupportAdjustBrightness()` 返回 false（`tools/sheng-usd-brightness-fix.sh`，步骤 6c；等价源码补丁见 `docs/patches/`）→ 改由合成器 gamma-manager 管亮度（值存 `/etc/ukui/usd/globalconf.ini [color]`），转屏/开机即保留，且无闪屏。见「openKylin 3.0：屏幕亮度 = 真实背光」 |
+| **openKylin3：调亮度后暗场景发灰（合成器软件亮度「滤镜」）** | gamma-manager 把用户值经 `GmHelper::normalizeBrightness` 映射后下发合成器 `com.kylin.Wlcom.Output.SetBrightness`，合成器对像素做乘法（`color *= brightness`）= 滤镜，压暗部。构建把 `normalizeBrightness`/`denormalizeBrightness` 钉成**常量 100**（`mov w0,#100; ret`，步骤 6c），亮度改由**真实面板背光**承担：`sheng-panel-brightness` 引擎（步骤 6a-5）监视 `globalconf.ini [color]` → 写 `/sys/class/backlight/ktz8866-backlight`。旧的 `sheng-backlight-fixed`（钉死背光）已移除。见「openKylin 3.0：屏幕亮度 = 真实背光」 |
+| **openKylin3：「设置→显示器」亮度滑块拖动无效** | `libdisplay.so` 的 `Widget::isSetGammaBrightness()` 本机恒 false → 滑块只写 gsettings `brightness-ac`（upm 硬件路），而 upm 驱动不了 ktz8866（`RegulateBrightness` 返回 `"no effective node"`）→ 无效；侧栏走 `setPrimaryBrightness`（gamma）故正常。构建装 `sheng-brightness-ac-bridge`（步骤 6a-3）监听 `brightness-ac` → 转发 `setPrimaryBrightness`。见「openKylin 3.0：「设置 → 显示器」亮度滑块」 |
 | **openKylin3：缩放屏幕最大只到 225%（选不到 250% / 275%）** | 同一 `libdisplay.so` 的 `OutputConfig::initScaleItem()` 用**硬编码分辨率阈值**加档：`250%` 只在当前分辨率宽度 **>3072**、`275%` 只在 **>3840** 时才 `addItem`，而本机面板原生 **3048×2032**（3048 不大于 3072/3840）→ 下拉框最大只到 225%（225% 的闸门是 >2560，3048 满足）。构建把 250%/275% 闸门 `cmp w0,#0xc00(3072)` / `#0xf00(3840)` 都改成 `#0xa00(2560)`（`install_display_scale`，步骤 6a-4；两种闸门各 3 处全替换）。合成器(wlcom)本身支持 2.5/2.75 分数缩放（实测 `kscreen-doctor output.DSI-1.scale.2.5` 生效、几何随之变化） |
+| **openKylin3：休眠时"黑屏但背光还亮一会"** | logind 先发 `PrepareForSleep(true)`（合成器立即关输出=黑屏，不动背光），再等一批 delay inhibitor 放行才真正 suspend；背光要等内核 suspend 才被 DSI 面板/`ktz8866` 驱动切断。构建装系统级 `sheng-suspend-backlight`（步骤 6e）监听 `PrepareForSleep`：`true`→背光写 0，`false`→还原。见「休眠时立即关背光」 |
+| **openKylin3：息屏后电源键"要等一会才响应"** | logind 等 `kylin-process-manager` 的 sleep delay 锁，硬等满 `InhibitDelayMaxSec`（默认 5s）才强制挂起；这 5s 屏幕黑但系统没睡，电源键无效。构建步骤 6f 装 logind drop-in 设 `InhibitDelayMaxSec=1`。见「休眠时立即关背光」 |
 | **`qrtr-ns.service` 失败** | 装 `qrtr` 包 + `ConditionPathExists` 兜底（没有就跳过） |
 | **`getty@ttyMSM0` 失败** | 去掉（内核命令行 `con_enabled=0`，该串口不存在） |
 | **没声音**（WirePlumber 走 ACP 不走 UCM → Dummy 输出） | 打补丁 `use-acp=false` + `sheng-audio-rebind`（ADSP 竞态后重探）+ `sheng-audio-ucm`（应用 UCM + 开 6 个 cs35l43 功放） |

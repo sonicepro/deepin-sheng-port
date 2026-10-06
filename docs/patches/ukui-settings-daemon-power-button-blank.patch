@@ -1,0 +1,41 @@
+ukui-settings-daemon (media-keys): handle the "blank" power-key action
+
+The hardware power key is handled by the media-keys plugin of ukui-settings-daemon.
+MediaKeyAction::doPowerKeyAction() reads the org.ukui.power-manager button-power
+enum index and calls doSessionAction(PowerType).  PowerType (media-type.h) only
+defines { POWER_SUSPEND=1, POWER_SHUTDOWN=2, POWER_HIBERNATE=3,
+POWER_INTER_ACTIVE=4 } — there is no index 0 entry, so the value "blank"
+(enum index 0) matches no case in doSessionAction()'s switch and falls through to
+executeCommand("ukui-session-tools", {}) — i.e. it just shows the session menu,
+so selecting "关闭显示器" did nothing but re-open the "询问" dialog.
+
+This is the equivalent SOURCE change for making "blank" turn the panel off/on.
+(The shipped fix, tools/sheng-power-button-blank-fix.sh, instead repoints the
+"ukui-session-tools" program string in the compiled libmedia-keys.so to the
+"ukui-session-tools"->"sheng-pwrkey" wrapper, so no rebuild is needed.)
+
+--- a/plugins/media-keys/media-type.h
++++ b/plugins/media-keys/media-type.h
+@@ -55,6 +55,7 @@ typedef enum {
+ typedef enum {
++    POWER_BLANK = 0,
+     POWER_SUSPEND = 1,
+     POWER_SHUTDOWN,
+     POWER_HIBERNATE,
+     POWER_INTER_ACTIVE,
+ }PowerType;
+--- a/plugins/media-keys/media-key-action.cpp
++++ b/plugins/media-keys/media-key-action.cpp
+@@ - (doPowerKeyAction)
+     PowerType buttonType = POWER_INTER_ACTIVE;
+     if (value.isValid()) {
+         buttonType = (PowerType)value.toInt();
+     } else {
+         USD_LOG(LOG_WARNING, "get power key state is null");
+     }
++    if (buttonType == POWER_BLANK) {
++        // sheng: 关闭/打开显示器
++        executeCommand("kscreen-doctor", QStringList({"-d", "off"}));
++        return;
++    }
+     doSessionAction(buttonType);

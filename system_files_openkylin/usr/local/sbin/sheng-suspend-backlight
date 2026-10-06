@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+# sheng-suspend-backlight
+# ---------------------------------------------------------------------------
+# openKylin 3.0 on the Xiaomi Pad 6S Pro (sheng): when you hit suspend, the
+# compositor (kylin-wlcom) blanks/de-powers the output *immediately* on logind's
+# PrepareForSleep(true), but the panel backlight (ktz8866) is only cut later
+# when the kernel actually suspends -- and logind first waits for a bunch of
+# "delay" inhibitors (screen lockers, process manager, QQ, ...). So there is a
+# window where the screen looks black but the backlight is still lit.
+#
+# This daemon listens on the system bus for logind's PrepareForSleep signal and
+# turns the backlight off as soon as it fires (true = about to suspend; false =
+# resumed or suspend cancelled), saving/restoring the value. Nothing else on the
+# system writes /sys/class/backlight, so this closes the gap.
+#
+# Runs as root (system service) so it can write the backlight node.
+# ---------------------------------------------------------------------------
+import subprocess
+import sys
+import time
+
+BL = "/sys/class/backlight/ktz8866-backlight/brightness"
+DEFAULT_ON = "1800"
+
+
+def warn(msg):
+    sys.stderr.write("sheng-suspend-backlight: %s\n" % msg)
+    sys.stderr.flush()
+
+
+def read_bl():
+    try:
+        return open(BL).read().strip()
+    except Exception:
+        return None
+
+
+def write_bl(v):
+    try:
+        with open(BL, "w") as f:
+            f.write(str(v))
+    except Exception as e:
+        warn("write %s=%s failed: %s" % (BL, v, e))
+
+
+def main():
+    warn("started")
+    saved = None
+    while True:
+        try:
+            proc = subprocess.Popen(
+                ["dbus-monitor", "--system",
+                 "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        except Exception as e:
+            warn("cannot start dbus-monitor: %s" % e)
+            time.sleep(3)
+            continue
+
+        want_arg = False
+        for line in proc.stdout:
+            if "member=PrepareForSleep" in line:
+                want_arg = True
+                continue
+            if want_arg and "boolean" in line:
+                want_arg = False
+                if "true" in line:
+                    saved = read_bl()
+                    write_bl(0)
+                    warn("suspend -> backlight off (saved %s)" % saved)
+                else:
+                    write_bl(saved if saved is not None else DEFAULT_ON)
+                    warn("resume/cancel -> backlight restored (%s)" % saved)
+                    saved = None
+
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
