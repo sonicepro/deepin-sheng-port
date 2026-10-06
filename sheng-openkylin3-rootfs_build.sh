@@ -38,6 +38,10 @@
 #       BRIGHTNESS_FIX_ENV=0 (optional — skip patching ukui-settings-daemon so the
 #                       compositor gamma-manager owns screen brightness (no
 #                       reset-to-max on rotation / boot)); default: on
+#       DISPLAY_SCALE_ENV=0 (optional — skip adding 250%/275% entries to the
+#                       control center "Display" screen-zoom dropdown; the panel
+#                       is 3048px wide, below the hardcoded 3072/3840 gates, so
+#                       the list otherwise stops at 225%); default: on
 #
 # Output (one per boot mode):
 #   openkylin_<ver>_<mode>_<ts>.img.gz   (Android-sparse ext4 rootfs, gzip)
@@ -553,6 +557,55 @@ install_autobrightness() {
     echo "   自动亮度配置完成"
 }
 
+# --- 「设置→显示器→缩放屏幕」加 250% / 275% 档 --------------------------------
+# 目标：控制中心「设置→显示器」的缩放下拉框能选 250% 与 275%。openKylin 3.0 的
+#   ukui-control-center libdisplay.so 里 OutputConfig::initScaleItem() 用**硬编码
+#   分辨率阈值**决定放哪些档：
+#     宽度 > 2560 → 225%   宽度 > 3072 → 250%   宽度 > 3840 → 275%
+#   本机面板原生 3048×2032（3048 大于 2560 但小于 3072/3840）→ 下拉框最大只到
+#   225%。做法：把 250%/275% 的闸门 cmp #0xc00(3072) / cmp #0xf00(3840) 都改成
+#   #0xa00(2560)，与 225% 同级。合成器(wlcom)本身支持 2.5/2.75 分数缩放。同长度
+#   二进制替换、无源码改动，稳定。libdisplay.so 里两种闸门各 3 处（多个
+#   OutputConfig 变体），全替换。DISPLAY_SCALE_ENV=0 可跳过。
+DISPLAY_SCALE_ENV="${DISPLAY_SCALE_ENV:-1}"
+
+install_display_scale() {
+    local rootdir="$1"
+    echo "==> 给「设置→显示器→缩放屏幕」加 250%/275% 档..."
+
+    local so
+    for so in "$rootdir"/usr/lib/*/ukui-control-center/libdisplay.so; do
+        [ -f "$so" ] || continue
+        python3 - "$so" <<'PY'
+import struct, sys
+p = sys.argv[1]
+d = bytearray(open(p, "rb").read())
+NEW = struct.pack("<I", 0x7128001f)            # cmp w0, #0xa00 (2560) — 与 225% 同级
+GATES = {
+    struct.pack("<I", 0x7130001f): "250% (cmp #0xc00, 3072)",
+    struct.pack("<I", 0x713c001f): "275% (cmp #0xf00, 3840)",
+}
+total = 0
+for old, name in GATES.items():
+    n, i = 0, 0
+    while True:
+        j = d.find(old, i)
+        if j < 0:
+            break
+        d[j:j+4] = NEW
+        n += 1
+        i = j + 4
+    if n == 0 and d.find(NEW) < 0:
+        print("   WARN: 未找到 %s 闸门，跳过（版本可能已变）" % name)
+    total += n
+    print("   %s: 改 %d 处" % (name, n))
+open(p, "wb").write(d)
+print("   共把 %d 处缩放闸门阈值下调到 2560" % total)
+PY
+    done
+    echo "   缩放屏幕 250%/275% 档配置完成"
+}
+
 # --- Extract once up front (so we can size the image to fit) -----------------
 echo "==> Extracting openKylin userland..."
 STAGE="$(mktemp -d)"
@@ -903,6 +956,13 @@ for MODE in "${BOOTMODES[@]}"; do
     #       setup_users 之后。见 install_autobrightness 顶部注释。AUTOBRIGHTNESS_ENV=0 可跳过。
     if is_true "$AUTOBRIGHTNESS_ENV"; then
         install_autobrightness "$ROOTDIR" "$USER_NAME" || echo "WARN: 自动亮度步骤返回非零，继续构建" >&2
+    fi
+
+    # 6a-4. 「设置→显示器→缩放屏幕」加 250%/275% 档（libdisplay.so 硬编码闸门
+    #       3072/3840 -> 2560，本机面板 3048 宽否则只到 225%）。见 install_display_scale
+    #       顶部注释。DISPLAY_SCALE_ENV=0 可跳过。
+    if is_true "$DISPLAY_SCALE_ENV"; then
+        install_display_scale "$ROOTDIR" || echo "WARN: 缩放屏幕 250%/275% 档步骤返回非零，继续构建" >&2
     fi
 
     # 6b. Fontconfig: pin the generic families to Noto so linglong/DTK apps don't
