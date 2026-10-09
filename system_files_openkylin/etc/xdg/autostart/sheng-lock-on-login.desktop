@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Lock session on login
+Comment=Lock the UKUI session right after (auto)login
+Exec=/usr/local/bin/sheng-lock-on-login
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-UKUI-Autostart-Phase=Initialization
+OnlyShowIn=UKUI;

@@ -1,0 +1,13 @@
+[Unit]
+Description=KMRE 移动应用列表桥接（修复软件商店「移动应用」页一直转圈）
+Documentation=file:/usr/local/bin/kmre-applist-bridge
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/kmre-applist-bridge
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

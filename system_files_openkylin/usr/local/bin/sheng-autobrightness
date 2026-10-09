@@ -24,6 +24,73 @@
 # Brightness is debounced so fast light changes do not make the panel strobe:
 # see SETTLE / DEADBAND / MIN_INTERVAL below.
 #
+# ------------------------------------------------------------------
+# USER BIAS -- "my manual adjustment becomes the baseline" (2026-10)
+# ------------------------------------------------------------------
+# Problem: the curve below is a fixed lux -> percent mapping. When it picks a
+# level the user finds too dark, the user slides brightness up -- and the next
+# time the curve decides to move the screen it snaps back down, discarding the
+# user's choice. That is the "auto brightness keeps making my screen dim again"
+# complaint.
+#
+# Fix: track the difference between what the USER sets and what the CURVE would
+# have picked at the current ambient light, and keep it as a persistent bias:
+#
+#     applied = clamp(curve(lux) + bias, 1, 100)
+#
+# So a manual +15 in a dim room stays +15 relative to the curve as the light
+# changes -- the manual value is honoured exactly at the moment it is made
+# (bias := manual - curve(lux_now), so curve+bias == manual, no snap-back) and
+# then rides along as the baseline for every later automatic adjustment.
+#
+# How manual changes are detected: the daemon polls the live UKUI brightness
+# (getPrimaryBrightness, the same 0..100 value the slider writes) and treats a
+# change it did not make as a manual adjustment. Notes:
+#   * the daemon never fights its own writes -- readback right after a write is
+#     ignored for WRITE_GRACE seconds, and a candidate must be seen twice in a
+#     row before it is believed, so a transient stale readback cannot be
+#     mistaken for a user action;
+#   * it is detected whether or not the auto-brightness toggle is currently on,
+#     so "turn auto off, set the level I like, turn auto back on" works;
+#   * the bias is persisted in ~/.config/sheng/autobrightness.conf, so it
+#     survives suspend, session restart and reboot. Delete the file (or run
+#     `sheng-autobrightness --reset-offset`) to fall back to the raw curve.
+#
+# The bias is deliberately NOT capped below the output clamp: if the user drags
+# the slider to 100, auto-brightness must leave it at 100 and not drag it back
+# down to something "safer" -- that would recreate the very bug being fixed.
+# SHENG_AUTOBRIGHTNESS_MAX_OFFSET exists for anyone who wants a smaller range.
+#
+# ------------------------------------------------------------------
+# ROTATION GLITCH -- "rotating the screen blasts brightness to 100%"
+# ------------------------------------------------------------------
+# Symptom (user report): switching landscape <-> portrait sometimes drives the
+# brightness to maximum.
+#
+# Root cause, measured on device with dbus-monitor + dconf byte decoding:
+#   ukui-settings-daemon re-applies a *recently written* org.ukui.power-manager
+#   `brightness-ac` when the outputs are reconfigured, and on sheng that apply
+#   path is broken -- it inflates the value (measured 51->78, 73->99,
+#   59->92 then 100) instead of applying it as-is. `brightness-ac` is usd's
+#   *input* key, so anything that writes it arms the glitch. The offender was
+#   our own sheng-brightness-ac-bridge, whose direction B mirrored the current
+#   brightness into `brightness-ac`: that write armed usd, and the next rotation
+#   (up to ~15s later) detonated it. Proof: with the bridge stopped,
+#   `brightness-ac` is never written and repeated rotations move nothing at all
+#   (verified across 30/20/55/62/95/100); with it running, one rotation pushed
+#   59 -> 92 and the next 92 -> 100.
+#
+# Two-part defect, so two-part fix:
+#   1) sheng-brightness-ac-bridge no longer writes `brightness-ac` at all
+#      (direction B is now opt-in) -- removes the arming.
+#   2) this daemon no longer mistakes the glitch for a user preference. It
+#      watches the compositor output geometry; for RECONF_WINDOW seconds after a
+#      reconfiguration an external brightness change is logged and dropped
+#      instead of being latched as the user bias (which used to pin the screen
+#      bright for good). If the glitch jumped the brightness by GLITCH_JUMP or
+#      more it is corrected instantly, bypassing SETTLE, so the screen blips
+#      rather than staying wrong.
+#
 # Runs as the desktop user (luser) so it can talk to the session bus. The
 # light sensor data path touches /dev/fastrpc-adsp, made readable by the
 # `luser` group via /etc/udev/rules.d/70-sheng-fastrpc.rules.
@@ -81,10 +148,42 @@ SETTLE = _envf("SHENG_AUTOBRIGHTNESS_SETTLE", 2.5)             # seconds a deman
 SETTLE_EPS = _envf("SHENG_AUTOBRIGHTNESS_SETTLE_EPS", 2)       # +/-% band that counts as held
 TOGGLE_POLL = _envf("SHENG_AUTOBRIGHTNESS_TOGGLE_POLL", 1.0)   # seconds between toggle re-checks
 
+# User-bias (manual adjustment as the baseline) knobs -- see the header.
+BIAS_ON = os.environ.get("SHENG_AUTOBRIGHTNESS_USER_BIAS", "1").lower() \
+    not in ("0", "false", "no", "off")
+MANUAL_TOL = _envf("SHENG_AUTOBRIGHTNESS_MANUAL_TOL", 3)        # % change that counts as manual
+WRITE_GRACE = _envf("SHENG_AUTOBRIGHTNESS_WRITE_GRACE", 2.5)    # ignore readback this long after our write
+READ_INTERVAL = _envf("SHENG_AUTOBRIGHTNESS_READ_INTERVAL", 0.5)# seconds between brightness reads
+MAX_OFFSET = _envf("SHENG_AUTOBRIGHTNESS_MAX_OFFSET", 100)      # +/- cap on the user bias
+BIAS_STEP = _envf("SHENG_AUTOBRIGHTNESS_BIAS_STEP", 0.5)        # min bias change worth logging/saving
+
+# Display-reconfiguration guard -- see "ROTATION GLITCH" in the header.
+RECONF_POLL = _envf("SHENG_AUTOBRIGHTNESS_RECONF_POLL", 0.5)     # s between output-signature reads
+RECONF_WINDOW = _envf("SHENG_AUTOBRIGHTNESS_RECONF_WINDOW", 5.0) # s after a reconfig treated as glitch
+GLITCH_JUMP = _envf("SHENG_AUTOBRIGHTNESS_GLITCH_JUMP", 15)      # % upward jump worth an instant fix
+
+_state_dir = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+    os.path.expanduser("~"), ".config")
+STATE_FILE = os.environ.get(
+    "SHENG_AUTOBRIGHTNESS_STATE",
+    os.path.join(_state_dir, "sheng", "autobrightness.conf"))
+
+# kylin-wlcom's output list, e.g.
+#   a(ss) 1 "DSI-1" "{ \"uuid\": ..., \"transform\": 0, \"scale\": 2.5, ... }"
+OUT_CMD = ["busctl", "--user", "call", "org.ukui.KWin", "/com/kylin/Wlcom/Output",
+           "com.kylin.Wlcom.Output", "ListAllOutputs"]
+# Only the geometry-ish fields: "brightness" is deliberately excluded, it moves
+# for reasons that are not a reconfiguration.
+_OUT_RE = re.compile(r'\\?"(transform|scale|width|height|enabled|primary)\\?":\s*\\?"?([0-9a-zA-Z.]+)')
+
 
 def warn(msg):
     sys.stderr.write("sheng-autobrightness: %s\n" % msg)
     sys.stderr.flush()
+
+
+def _clampf(v, lo, hi):
+    return lo if v < lo else (hi if v > hi else v)
 
 
 def gs_get_bool(key):
@@ -105,8 +204,7 @@ def gs_set_bool(key, value):
     try:
         subprocess.run(["gsettings", "set", SCHEMA, key,
                         "true" if value else "false"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=5)
+                       capture_output=True, timeout=5)
     except Exception:
         pass
 
@@ -125,6 +223,38 @@ def lux_to_pct(lux):
     return int(round(CURVE[-1][1]))
 
 
+def output_signature():
+    """Geometry signature of the compositor outputs, or None.
+
+    Changes exactly when the outputs are reconfigured (rotation, scale, mode),
+    which is the moment ukui-settings-daemon re-applies a stale brightness-ac
+    and blows the brightness up (see "ROTATION GLITCH" in the header).
+    """
+    try:
+        out = subprocess.run(OUT_CMD, capture_output=True, text=True,
+                             timeout=5).stdout
+    except Exception:
+        return None
+    sig = ",".join("%s=%s" % (k, v) for k, v in _OUT_RE.findall(out))
+    return sig or None
+
+
+def get_brightness():
+    """Read the live UKUI brightness (0..100) or None.
+
+    This is the value the sidebar/quick-settings slider, the control-center
+    Display slider (via sheng-brightness-ac-bridge) and this daemon all write,
+    so it is the authoritative "what is on screen now".
+    """
+    try:
+        out = subprocess.run(
+            ["busctl", "--user", "call", DEST, OBJ, IFACE, "getPrimaryBrightness"],
+            capture_output=True, text=True, timeout=5).stdout.strip()
+        return int(out.split()[-1])
+    except Exception:
+        return None
+
+
 def set_brightness(pct):
     """Ask UKUI to set the primary screen brightness; True on success."""
     pct = max(1, min(100, int(pct)))
@@ -132,17 +262,76 @@ def set_brightness(pct):
         r = subprocess.run(
             ["dbus-send", "--session", "--print-reply", "--dest=" + DEST, OBJ,
              IFACE + ".setPrimaryBrightness", "uint32:%d" % pct],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            capture_output=True, timeout=5)
         return r.returncode == 0
     except Exception as e:
         warn("setPrimaryBrightness(%d) failed: %s" % (pct, e))
         return False
 
 
+def load_bias():
+    """Read the persisted user bias (percent). 0.0 if absent/unreadable."""
+    try:
+        with open(STATE_FILE) as f:
+            for line in f:
+                k, _, v = line.partition("=")
+                if k.strip() == "offset":
+                    return _clampf(float(v.strip()), -MAX_OFFSET, MAX_OFFSET)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        warn("cannot read %s: %s" % (STATE_FILE, e))
+    return 0.0
+
+
+def save_bias(bias):
+    try:
+        d = os.path.dirname(STATE_FILE)
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write("# sheng-autobrightness user bias\n")
+            f.write("# applied = curve(lux) + offset ; delete this file to reset\n")
+            f.write("offset=%.2f\n" % bias)
+        os.replace(tmp, STATE_FILE)
+    except Exception as e:
+        warn("cannot write %s: %s" % (STATE_FILE, e))
+
+
 def start_reader():
-    return subprocess.Popen(
-        ["ssccli", "--sensor", SSC_SENSOR, "--timeout", "3600"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    """Start `ssccli` streaming light measurements."""
+    argv = ["ssccli", "--sensor", SSC_SENSOR, "--timeout", "3600"]
+    try:
+        return subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    except OSError as e:
+        # Observed on this device: for a few minutes at a time (e.g. while
+        # kylin-process-manager holds the "idle" scene) /dev/null cannot be
+        # opened by the desktop user, which makes stderr=DEVNULL raise EACCES
+        # and killed both sensor daemons. Merging stderr needs no /dev/null,
+        # and the lux parser ignores any non-matching line.
+        warn("stderr=DEVNULL unavailable (%s); merging stderr instead" % e)
+        return subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+
+def _status():
+    bias = load_bias()
+    cur = get_brightness()
+    print("state file : %s%s" % (STATE_FILE,
+                                 "" if os.path.exists(STATE_FILE) else "  (absent)"))
+    print("user bias  : %+.1f %%" % bias)
+    print("brightness : %s" % ("%d %%" % cur if cur is not None else "unavailable"))
+    print("curve      : %s" % ", ".join("%g lux -> %g%%" % p for p in CURVE))
+    return 0
+
+
+def _reset():
+    save_bias(0.0)
+    warn("user bias reset to 0 (raw curve); a running daemon picks this up "
+         "within ~%gs" % READ_INTERVAL)
+    return 0
 
 
 def main():
@@ -151,9 +340,14 @@ def main():
     for i, a in enumerate(sys.argv):
         if a == "--fake-lux" and i + 1 < len(sys.argv):
             fake_lux = float(sys.argv[i + 1])
-    warn("started (pid %d)%s%s" % (
+
+    bias = load_bias() if BIAS_ON else 0.0
+    warn("started (pid %d)%s%s%s" % (
         os.getpid(), " [debug]" if debug else "",
-        " [fake-lux=%g]" % fake_lux if fake_lux is not None else ""))
+        " [fake-lux=%g]" % fake_lux if fake_lux is not None else "",
+        "" if BIAS_ON else " [user bias disabled]"))
+    if BIAS_ON and bias:
+        warn("user bias %+.1f%% loaded from %s" % (bias, STATE_FILE))
 
     # Advertise that this tablet has a light sensor so the control-center switch
     # is shown (GlobalSignal.isPresenceLightSensor reads have-sensor).
@@ -166,6 +360,20 @@ def main():
     pending_pct = None
     pending_t = 0.0
     enabled = None
+
+    prev_cur = None          # last settled on-screen brightness we know about
+    cand_cur = None          # unconfirmed external change (needs a 2nd sighting)
+    last_read_t = 0.0
+    state_mtime = None
+    try:
+        state_mtime = os.stat(STATE_FILE).st_mtime
+    except OSError:
+        pass
+
+    out_sig = None           # last compositor output signature
+    last_sig_t = 0.0
+    last_reconf_t = -1e9     # when the outputs were last reconfigured
+    force_apply = False      # set to bypass SETTLE for a glitch correction
 
     while True:
         if proc is None or proc.poll() is not None:
@@ -209,7 +417,10 @@ def main():
                 lux = float(m.group(1))
             ema = lux if ema is None else ema * (1.0 - EMA_ALPHA) + lux * EMA_ALPHA
             if debug:
-                warn("lux=%.1f ema=%.1f -> %d%%" % (lux, ema, lux_to_pct(ema)))
+                warn("lux=%.1f ema=%.1f -> %d%%%s" % (
+                    lux, ema, lux_to_pct(ema),
+                    "" if not BIAS_ON else " bias %+.1f -> %d%%" % (
+                        bias, int(round(_clampf(lux_to_pct(ema) + bias, 1, 100))))))
 
         if fake_lux is not None and ema is None:
             ema = fake_lux
@@ -227,10 +438,109 @@ def main():
                     warn("toggle OFF")
             enabled = new_enabled
 
+        now = time.time()
+
+        # --- pick up an externally reset bias ---------------------------------
+        if BIAS_ON:
+            try:
+                mt = os.stat(STATE_FILE).st_mtime
+            except OSError:
+                mt = None
+            if mt != state_mtime:
+                state_mtime = mt
+                disk = load_bias()
+                if abs(disk - bias) >= BIAS_STEP:
+                    bias = disk
+                    pending_pct = None
+                    warn("user bias %+.1f%% picked up from %s" % (bias, STATE_FILE))
+
+        # --- notice display reconfigurations (rotation) -----------------------
+        if BIAS_ON and now - last_sig_t >= RECONF_POLL:
+            last_sig_t = now
+            sig = output_signature()
+            if sig is not None:
+                if out_sig is not None and sig != out_sig:
+                    last_reconf_t = now
+                    if debug:
+                        warn("display reconfigured -> brightness changes for the "
+                             "next %.0fs are treated as glitches" % RECONF_WINDOW)
+                out_sig = sig
+
+        # --- read the on-screen brightness; learn from manual adjustments -----
+        if BIAS_ON and now - last_read_t >= READ_INTERVAL:
+            last_read_t = now
+            cur = get_brightness()
+            if cur is not None:
+                if prev_cur is None:
+                    prev_cur = cur          # startup: adopt, never infer a bias
+                    if last_applied is None:
+                        # Treat what is already on screen as applied, so the
+                        # DEADBAND test applies from the first moment and a
+                        # 1-2% difference does not cause a pointless write.
+                        last_applied = cur
+                    if debug:
+                        warn("baseline read: brightness %d%%" % cur)
+                elif abs(cur - prev_cur) < MANUAL_TOL:
+                    prev_cur = cur          # settled
+                    cand_cur = None
+                elif now - last_apply_t < WRITE_GRACE:
+                    pass                    # our own write may not have landed yet
+                elif cand_cur is not None and abs(cur - cand_cur) < MANUAL_TOL:
+                    # Seen twice in a row -> a real external change.
+                    prev_cur = cur
+                    cand_cur = None
+                    if now - last_reconf_t < RECONF_WINDOW:
+                        # Right after an output reconfiguration ukui-settings-
+                        # daemon re-applies a recently written brightness-ac and
+                        # inflates it (measured: 51->78, 59->92->100, 73->99).
+                        # That is a glitch, not a preference: never learn it, and
+                        # put our own value back immediately instead of waiting
+                        # out SETTLE.
+                        jumped = (last_applied is not None
+                                  and abs(cur - last_applied) >= GLITCH_JUMP)
+                        warn("ignoring brightness %d%% seen %.1fs after a display "
+                             "reconfiguration (not learned as a user bias)%s"
+                             % (cur, now - last_reconf_t,
+                                "; restoring now" if jumped else ""))
+                        force_apply = jumped
+                    elif ema is not None:
+                        base = lux_to_pct(ema)
+                        new_bias = _clampf(cur - base, -MAX_OFFSET, MAX_OFFSET)
+                        if abs(new_bias - bias) >= BIAS_STEP:
+                            bias = new_bias
+                            save_bias(bias)
+                            try:
+                                state_mtime = os.stat(STATE_FILE).st_mtime
+                            except OSError:
+                                pass
+                            warn("manual brightness %d%% at lux=%.1f "
+                                 "(curve says %d%%) -> user bias %+.1f%%"
+                                 % (cur, ema, base, bias))
+                        elif debug:
+                            warn("manual brightness %d%% at lux=%.1f -> bias "
+                                 "unchanged %+.1f%%" % (cur, ema, bias))
+                    if not force_apply:
+                        # The screen already shows `cur`; make it the applied
+                        # value so nothing is re-written on top of the user.
+                        last_applied = cur
+                        pending_pct = None
+                else:
+                    cand_cur = cur          # first sighting; wait for confirmation
+
         if enabled and ema is not None:
-            pct = lux_to_pct(ema)
+            pct = int(round(_clampf(lux_to_pct(ema) + bias, 1, 100)))
             now = time.time()
-            if last_applied is not None and abs(pct - last_applied) < DEADBAND:
+            if force_apply:
+                # Undo the reconfiguration glitch without the debounce delay.
+                force_apply = False
+                if pct != prev_cur and set_brightness(pct):
+                    last_applied = pct
+                    prev_cur = pct
+                    last_apply_t = now
+                    pending_pct = None
+                    warn("restored brightness %d%% after the reconfiguration "
+                         "glitch" % pct)
+            elif last_applied is not None and abs(pct - last_applied) < DEADBAND:
                 # Back within the deadband of what is on screen -> drop any
                 # pending change (the light drifted back).
                 pending_pct = None
@@ -243,6 +553,7 @@ def main():
                 # Held steady for SETTLE seconds -> apply once.
                 if set_brightness(pct):
                     last_applied = pct
+                    prev_cur = pct
                     last_apply_t = now
                     pending_pct = None
                     if debug:
@@ -251,6 +562,10 @@ def main():
 
 if __name__ == "__main__":
     try:
+        if "--status" in sys.argv:
+            sys.exit(_status())
+        if "--reset-offset" in sys.argv:
+            sys.exit(_reset())
         main()
     except KeyboardInterrupt:
         pass

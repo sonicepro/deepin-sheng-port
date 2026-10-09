@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+# sheng-osk-rotate — keep the on-screen keyboard's window size in step with the
+# screen orientation while its view is preloaded.
+#
+# WHY THIS EXISTS
+#   kylin-virtual-keyboard can preload its QML view (gsettings
+#   org.ukui.virtualkeyboard preload-view-enabled=true) which makes it pop ~38%
+#   faster (0.51-0.53s -> 0.31-0.36s on sheng), but it then keeps the window size
+#   it was built with.  The geometry is computed live
+#       geometrymanager.cpp:54  -> expansiongeometrymanager.cpp:24
+#       -> screenwatcher.cpp:39 (QScreen::geometry())
+#   and the rotation event is emitted fine (screenwatcher.cpp:241), BUT applying
+#   it to the window is gated on visibility:
+#       virtualkeyboardmanager.cpp:274   if (!view_->isVisible()) return;
+#       virtualkeyboardview.cpp:102      if (!isVisible()) return;
+#   and the only unconditional apply, initView():
+#       virtualkeyboardview.cpp:196      view_->setGeometry(calculateInitialGeometry());
+#   is skipped once the view exists:
+#       virtualkeyboardview.cpp:150      if (view_ != nullptr && preloadViewEnabled) return;
+#   So with the preload on, "hide the keyboard, rotate, reopen" presents the old
+#   orientation's size.  (Rotating while it is OPEN is fine - then
+#   updateGeometry() does run.)
+#
+#   Fix without recompiling: when the orientation changed while the keyboard was
+#   hidden, restart the keyboard process so the view is rebuilt at the current
+#   orientation (initView() -> calculateInitialGeometry() -> setGeometry()).
+#   The pop stays preloaded/fast and the size follows the screen.
+#
+# SAFETY RULES (each one exists because of an observed failure)
+#   1. NEVER touch a visible keyboard: it resizes itself on rotation and killing
+#      the process makes the keyboard vanish (observed as "rotating closes my
+#      keyboard").  IsVirtualKeyboardVisible goes through a state machine
+#      (ShowingState -> true, HidingState -> false, VisibleState -> true) so a
+#      single sample can land mid-animation: only an explicit False counts, it
+#      must survive several spaced samples, and it is re-checked immediately
+#      before the kill.  None (keyboard not answering) is NOT "hidden".
+#   2. ALWAYS RECOVER: the process manager usually relaunches the keyboard in
+#      ~0.14s, but it can refuse.  If the keyboard is not back after
+#      RELAUNCH_WAIT, start it explicitly - with QT_QPA_PLATFORM=wayland, because
+#      the session only exports QT_QPA_PLATFORMTHEME and a bare launch then dies
+#      with "Could not load the Qt platform plugin".  This also covers the
+#      keyboard's own crash in the rotation path (screenwatcher -> QWindow::
+#      screen() null deref), which hits exactly when the screen is rotated.
+#   3. Remember a rotation that happened while the keyboard was VISIBLE: its
+#      window resized itself, but the moment it is hidden again the reused window
+#      is stale again, so the rebuild is deferred until then.
+#   4. Back off ONLY when the keyboard looks crash-looping, i.e. when it dies
+#      without us killing it.  An earlier revision capped *all* actions
+#      (4 per 300s) and that broke normal use: hide-rotate-open, rotate back, and
+#      a deferred rebuild already exhausted the budget, after which rotation
+#      stopped being followed for five minutes.  Rotations must always work, so
+#      there is no action-count cap; the minimum gap between two actions only
+#      prevents a tight loop, and genuine crash-looping (which once made
+#      kylin-process-manager give up on the keyboard entirely, needing a reboot)
+#      triggers a pause.
+#
+#   The upstream-grade one-line fix is kept as
+#   docs/patches/kylin-virtual-keyboard-preload-rotation.patch -- once the shipped
+#   keyboard carries it, drop this daemon (build: OSK_ROTATE_ENV=0) and keep
+#   OSK_PRELOAD_ENV=1.
+#
+# Runs as the desktop user (luser) so it can reach the session bus.
+import os
+import signal
+import subprocess
+import sys
+import time
+
+IFACE = "com.kylin.statusmanager.interface"
+OBJ = "/"
+KBD = "/usr/bin/kylin-virtual-keyboard"
+KBD_NAME = "org.fcitx.Fcitx5.VirtualKeyboard"
+KBD_PATH = "/org/fcitx/virtualkeyboard/impanel"
+KBD_IFACE = "org.fcitx.Fcitx5.VirtualKeyboard1"
+
+POLL = 1.0            # seconds between orientation checks (1Hz, negligible cost)
+SETTLE = 0.5          # let the compositor finish the rotation before restarting
+CONFIRM = 3           # spaced samples needed to call the keyboard "hidden"
+CONFIRM_GAP = 0.15    # seconds between confirmation samples
+RELAUNCH_WAIT = 6.0   # how long to let the process manager bring it back
+MIN_GAP = 3.0         # never do two actions closer than this apart
+CRASH_WINDOW = 300.0  # window for counting *unexpected* keyboard deaths
+CRASH_LIMIT = 5       # more than this many unexpected deaths -> pause
+CRASH_PAUSE = 600.0   # how long to stop acting after a crash loop
+START_GRACE = 3.0     # ignore a just-started process's shaky samples this long
+LOG = os.path.expanduser("~/.log/sheng-osk-rotate.log")
+
+
+def log(msg):
+    line = "%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+    try:
+        with open(LOG, "a") as fh:
+            fh.write(line)
+    except Exception:
+        pass
+    sys.stderr.write("sheng-osk-rotate: %s\n" % msg)
+    sys.stderr.flush()
+
+
+def _run(argv, timeout=10, env=None):
+    try:
+        return subprocess.run(argv, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=timeout, env=env)
+    except Exception:
+        return None
+
+
+def _busctl(*args):
+    """Return the last whitespace field of a busctl call, or None on failure."""
+    r = _run(["busctl", "--user", "call"] + list(args))
+    if r is None or r.returncode != 0:
+        return None
+    out = r.stdout.decode("utf-8", "replace").strip()
+    return out.rsplit(" ", 1)[-1].strip().strip('"') if out else None
+
+
+def current_rotation():
+    return _busctl(IFACE, OBJ, IFACE, "get_current_rotation")
+
+
+def keyboard_visible():
+    """True / False, or None when the keyboard is not answering (down/restarting).
+
+    None is NOT the same as False: a keyboard that is down must never be counted
+    as "hidden, safe to restart".
+    """
+    v = _busctl(KBD_NAME, KBD_PATH, KBD_IFACE, "IsVirtualKeyboardVisible")
+    if v is None:
+        return None
+    return v == "true"
+
+
+def confirm_hidden():
+    seen = []
+    for i in range(CONFIRM):
+        v = keyboard_visible()
+        seen.append(v)
+        if v is not False:
+            return False, seen
+        if i != CONFIRM - 1:
+            time.sleep(CONFIRM_GAP)
+    return True, seen
+
+
+def keyboard_pids():
+    r = _run(["pgrep", "-f", KBD])
+    if r is None:
+        return []
+    return [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+
+
+def launch_env():
+    """Environment the keyboard needs.  The session exports only
+    QT_QPA_PLATFORMTHEME=ukui, so a bare launch dies with
+    "Could not load the Qt platform plugin" - QT_QPA_PLATFORM must be explicit."""
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+    env.setdefault("XDG_SESSION_TYPE", "wayland")
+    env["QT_QPA_PLATFORM"] = "wayland"
+    env.setdefault("QT_QPA_PLATFORMTHEME", "ukui")
+    return env
+
+
+def start_keyboard(why):
+    """Safety rule 2: bring the keyboard back even if the manager will not."""
+    log("starting keyboard explicitly (%s)" % why)
+    try:
+        subprocess.Popen(["/usr/bin/org.ukui.virtualkeyboard.start.sh"],
+                         env=launch_env(), stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception as e:
+        log("  explicit start failed: %r" % (e,))
+        return False
+    for _ in range(int(RELAUNCH_WAIT * 4)):
+        time.sleep(0.25)
+        if keyboard_pids():
+            log("  keyboard up (%s)" % keyboard_pids())
+            return True
+    log("  WARN: explicit start did not produce a process")
+    return False
+
+
+def restart_keyboard(why):
+    """Terminate the keyboard and make sure it comes back.
+
+    The process manager normally relaunches it in ~0.14s; if it refuses, the
+    keyboard is started explicitly (rule 2) so a rotation can never leave the
+    device without its only input method.
+    """
+    pids = keyboard_pids()
+    if pids:
+        log("restarting keyboard (pids %s): %s" % (pids, why))
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                log("  kill %d failed: %r" % (pid, e))
+    else:
+        log("no keyboard process running: %s" % why)
+
+    deadline = time.time() + RELAUNCH_WAIT
+    while time.time() < deadline:
+        time.sleep(0.25)
+        if keyboard_pids():
+            log("  keyboard back (%s), relaunched by the process manager"
+                % keyboard_pids())
+            return True
+    return start_keyboard(why)
+
+
+class Guard:
+    """Safety rule 4: let rotations through, back off only on crash loops.
+
+    ``expected`` marks the kills this daemon performs, so the process
+    disappearing right afterwards is not counted as a crash.
+    """
+
+    def __init__(self):
+        self.last_action = 0.0
+        self.deaths = []            # timestamps of unexplained disappearances
+        self.paused_until = 0.0
+        self.expected_kill = False
+
+    def min_gap_ok(self, now):
+        return now - self.last_action >= MIN_GAP
+
+    def note_action(self, now):
+        self.last_action = now
+
+    def note_death(self, now):
+        self.deaths = [t for t in self.deaths if now - t < CRASH_WINDOW]
+        self.deaths.append(now)
+        if len(self.deaths) > CRASH_LIMIT:
+            self.paused_until = now + CRASH_PAUSE
+            log("CRASH LOOP: %d unexplained keyboard deaths in %.0fs - pausing "
+                "%.0fs (a reboot restores kylin-process-manager auto-restart)"
+                % (len(self.deaths), CRASH_WINDOW, CRASH_PAUSE))
+            self.deaths = []
+
+    def paused(self, now):
+        if now < self.paused_until:
+            return True
+        if self.paused_until:
+            log("crash-loop pause over, acting again")
+            self.paused_until = 0.0
+        return False
+
+
+def main():
+    log("started (pid %d), poll=%.1fs" % (os.getpid(), POLL))
+    built_for = None      # orientation the current view was built in
+    pending = None        # orientation needing a rebuild once the kbd is hidden
+    guard = Guard()
+    self_started_at = 0.0
+    prev_pids = set()
+
+    while True:
+        try:
+            now = time.time()
+            pids = set(keyboard_pids())
+            rot = current_rotation()
+            vis = keyboard_visible()
+            if now - self_started_at < START_GRACE:
+                vis = None            # ignore a freshly started process's samples
+
+            # Did the keyboard vanish without us killing it?  (Rule 4)
+            if prev_pids and not pids and not guard.expected_kill:
+                guard.note_death(now)
+            guard.expected_kill = False
+            prev_pids = pids
+
+            if rot is None:
+                time.sleep(POLL)
+                continue
+
+            if guard.paused(now):
+                time.sleep(POLL)
+                continue
+
+            # A missing keyboard outranks the orientation bookkeeping: on this
+            # device the keyboard *is* the input method.
+            if vis is None and not pids:
+                if guard.min_gap_ok(now):
+                    guard.note_action(now)
+                    if start_keyboard("keyboard process is gone"):
+                        self_started_at = time.time()
+                time.sleep(POLL)
+                continue
+
+            if built_for is None:
+                built_for = rot
+                log("baseline orientation = %s (kbd visible=%s)" % (rot, vis))
+            elif rot != built_for:
+                if vis is not False:
+                    # Visible (or not answering): it resizes itself, never kill it.
+                    # built_for deliberately does not advance, so remember the
+                    # rotation once and log only the transition.
+                    if pending != rot:
+                        pending = rot
+                        log("orientation %s -> %s, kbd visible=%s: no action, "
+                            "marked pending" % (built_for, rot, vis))
+                elif pending == rot:
+                    pass          # the deferred block below owns this rotation
+                elif not guard.min_gap_ok(now):
+                    log("orientation %s -> %s: too soon after the last action, "
+                        "deferring" % (built_for, rot))
+                    pending = rot
+                else:
+                    time.sleep(SETTLE)
+                    hidden, seen = confirm_hidden()
+                    if hidden:
+                        guard.note_action(now)
+                        guard.expected_kill = True
+                        restart_keyboard("orientation %s -> %s while hidden"
+                                         % (built_for, rot))
+                        self_started_at = time.time()
+                        built_for = rot
+                        pending = None
+                    else:
+                        pending = rot
+                        log("orientation %s -> %s: kbd reappeared during decision, "
+                            "deferred (samples=%s)" % (built_for, rot, seen))
+
+            if pending is not None and pending != built_for and vis is False:
+                if guard.min_gap_ok(now):
+                    hidden, seen = confirm_hidden()
+                    if hidden:
+                        guard.note_action(now)
+                        guard.expected_kill = True
+                        restart_keyboard("deferred rebuild for orientation %s"
+                                         % pending)
+                        self_started_at = time.time()
+                        built_for = pending
+                        pending = None
+                    else:
+                        log("deferred rebuild for %s skipped (samples=%s)"
+                            % (pending, seen))
+        except Exception as e:
+            log("loop error: %r" % (e,))
+        time.sleep(POLL)
+
+
+if __name__ == "__main__":
+    main()

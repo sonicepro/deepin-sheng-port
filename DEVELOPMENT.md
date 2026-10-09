@@ -95,6 +95,20 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 > 社区版商店 `flutter-linglong-store` **不在构建内**（用户不需要）；它另需后端
 > `storeapi.linyaps.org.cn`，与本环境无关。
 
+### openKylin 3.0：开机登录方式（autologin + 立即锁屏）
+
+**目标**：开机既要**密码**、又**不卡**。做法 = lightdm **自动登录 + 登录后立即锁屏**：桌面会话在开机阶段就在锁屏**后面**预载好，用户看到的是锁屏，输密码只是解锁 → **秒进**（若用普通 greeter，会话要等输完密码才开始加载 → 明显等一截）。
+
+构建步骤 7 做两件事（开关 **`AUTOLOGIN_ENV`，默认开**；设 `0` 则回到普通 ukui-greeter）：
+1. **`setup_lightdm_autologin`** 写 `/etc/lightdm/lightdm.conf.d/00-sheng-autologin.conf`
+   （`[Seat:*]` + `autologin-user=<user>` + `autologin-user-timeout=0`）→ lightdm 开机以 `lightdm-autologin` 服务直接进用户会话（日志 `Started with service 'lightdm-autologin'`、`Authentication complete ... Success`）。
+2. **`install_lock_on_login`** 落 `/usr/local/bin/sheng-lock-on-login` + `/etc/xdg/autostart/sheng-lock-on-login.desktop`，会话起来后**立即锁屏**。
+
+- ⚠️ **lightdm 自带的 autologin 锁屏键是死的**：`autologin-user-lock` / `enable-autologin-user-lock`（`97-ukui-greeter-wlcom.conf` 里那个）在本机**都不生效**（实机验证：自动登录后仍是解锁桌面；`enable-` 那个还被 lightdm 报 `unknown option`）。锁屏由我们自己的 `sheng-lock-on-login` 做。
+- **锁屏为什么能“盖在桌面上”**：该 XDG autostart 项用 **`X-UKUI-Autostart-Phase=Initialization`**（和 `ukui-screensaver` 同一 phase），于是在 `Panel`/`Application`（ukui-panel、peony-desktop 等）**之前**就锁屏；脚本**后台 detach**（`setsid … --worker`）等 `ukui-screensaver-backend` 拿到会话总线名 `org.ukui.ScreenSaver` 后调 `ukui-screensaver-command --lock`。⚠️ 不设 phase（默认落到 `Application`）会退化成“桌面加载完才锁屏”。
+- ⚠️ 与「息屏要不要密码」是**两回事**：后者由 `org.ukui.screensaver close-activation-enabled` 控制（默认 `true`，见「电源键关闭显示器」一节）；本项只管**开机首次登录**。
+- ⚠️ **改登录/会话相关配置后不要 `systemctl restart lightdm` 就地生效** —— 那会在 KMRE（安卓）显示仍连着时杀掉合成器 → `arm-smmu … Unhandled context fault` **花屏**（实测踩过）。**一律用重启**（`systemctl reboot`）生效。
+
 ### openKylin 3.0：自动转屏（ADSP SSC 加速度计 → UKUI 转屏）
 
 同一构建循环里有 **`install_autorotate`（步骤 6a；开关 `AUTOROTATE_ENV`，默认开）**，让平板
@@ -157,6 +171,55 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 - 落地文件：`system_files_openkylin/usr/local/bin/sheng-autobrightness`、
   `system_files_openkylin/etc/systemd/user/sheng-autobrightness.service`（enable 软链由构建为用户建）。
 
+#### 用户偏置：把手动调的亮度作为自动亮度的「基准」（2026-10 加入）
+
+**问题**：上面的曲线是lux→亮度的**固定映射**。当它给的亮度偏暗、用户手动往上调之后，曲线下一次
+决定动屏幕时会把用户的选择**覆盖掉**——这就是「自动亮度后面还会让屏幕变暗」的根因。
+
+**做法**：记录**用户设定值**与**曲线在当时的取值**之差，作为持久偏置 `bias`，此后一律按
+
+```
+applied = clamp(curve(lux) + bias, 1, 100)
+```
+
+输出。于是「暗房里手动 +15」在光线变化后仍然是相对曲线 +15：手动值在被调的那一刻被**精确保留**
+（`bias := manual - curve(lux_now)`，所以 `curve+bias == manual`，当场不会被拉回），之后作为基准一路
+跟随。
+
+**手动调整怎么识别**：守护进程轮询会话总线上**当前**的 UKUI 亮度
+（`getPrimaryBrightness`，与滑块写的是同一个 0..100 值），把**不是自己写出的变化**当作手动调整。要点：
+
+- **绝不与自己的写入打架**：自己写完后 `WRITE_GRACE`（默认 2.5s）内的回读一律忽略；且候选新值必须
+  **连续两次读到**才被采信——总线回读延迟、bridge 回环造成的瞬时抖动不会被误判成用户操作。
+- **开关为关时也会识别**：所以「关掉自动亮度 → 调到喜欢的亮度 → 再打开自动亮度」是生效的。
+- **持久化**在 `~/.config/sheng/autobrightness.conf`，可跨挂起 / 会话重启 / 重启存活。删掉该文件或
+  `sheng-autobrightness --reset-offset` 即回到纯曲线（运行中的守护进程会在 ~0.5s 内自动拾取）；
+  `sheng-autobrightness --status` 打印当前偏置与实时亮度。
+- **偏置不额外设上限**（只受 1..100 输出钳制）：用户把滑块拉到 100，自动亮度就必须停在 100，不能
+  「为了安全」把它压回某个值——否则又会重现本 bug。需要收窄可用
+  `SHENG_AUTOBRIGHTNESS_MAX_OFFSET`。
+- 其他可调项：`SHENG_AUTOBRIGHTNESS_{USER_BIAS,MANUAL_TOL,WRITE_GRACE,READ_INTERVAL,BIAS_STEP}`。
+- 顺手修的健壮性问题：`kylin-process-manager` 进入 idle 场景时会有一段时间任何进程都打不开
+  `/dev/null`（真机实测 21:18–21:26 共 94 次 `[Errno 13] Permission denied: '/dev/null'`），
+  而旧代码用 `stderr=subprocess.DEVNULL` 起 `ssccli`，于是**自动亮度与自动转屏同时瘫掉**约 8 分钟。
+  现在起读取进程失败会退回 `stderr=STDOUT`（不需要 `/dev/null`），其余小命令也改用
+  `capture_output=True`，整个守护进程不再依赖 `/dev/null`。
+
+> 真机验证（2026-10-08 21:58–22:04，`--debug`）：曲线 41% 时手动调到 60% → 日志
+> `manual brightness 60% at lux=31.2 (curve says 41%) -> user bias +19.0%`，随后 14s 内亮度**稳定停在
+> 60%（不再被拉回 41%）**；重启服务后 `user bias +19.0% loaded`，亮度仍是 60%。离线仿真脚本
+> 覆盖学习 / 跟随 / 重启不回落 / 回读延迟不产生幻影偏置 / 单帧抖动忽略 / 在线 reset 六种场景。
+>
+> **「幻影偏置」专项排查（重要）**：本设计把**任何**非自身写入都当手动调整，所以必须先确认本机
+> **没有会自动改亮度的东西**（空闲降亮度 / 电源策略），否则会把它们学成偏置、越用越暗。实测：
+> 让用户完全不动手，用 `dbus-monitor` 盯 `org.ukui.SettingsDaemon` 2.5 分钟——期间落到总线上的
+> `setPrimaryBrightness` 只有 **守护进程自己 + 亮度桥接回环**两次（`sender` 均为一次性 `dbus-send`/
+> `busctl` 连接），**零次第三方调用**；同时设备正处于**电池放电(52%) + `idle-dim-battery=true` +
+> `idle-dim-time=60`**，空闲降亮度本该触发却毫无动静。这与「upm 的亮度通道在本机是死的」一致
+> （见「亮度滑块桥接」），因此**不需要**再加 logind 空闲守卫——结论是有证据的，不是假设。
+> 排查中确认 `getPrimaryBrightness` 被桥接以 1s 周期调用，单次 `busctl` 约 7ms，守护进程稳态
+> CPU 0.3%，故 0.5s 轮询的代价可忽略。
+
 > 与自带插件可能“双重控制”：本守护进程默认生效、而自带插件默认 `active=false`（不加装它）。
 > 若日后用户手动把插件 `active` 打开、且它在新环境里又能工作，可能两者抢亮度，届时二选一。
 
@@ -212,10 +275,33 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 - `brightness-ac` 的落地点是 **upm 硬件背光**（写它会触发 `org.ukui.powermanagement.RegulateBrightness`），而本机 upm 驱动不了 `ktz8866`（`RegulateBrightness` 返回 `"no effective node"`，`CanSetBrightness=false`）→ **拖动无效**。
 - 侧栏/快捷中心直接调 `org.ukui.SettingsDaemon /GlobalBrightness` 的 `setPrimaryBrightness` → gamma-manager → 合成器 `SetBrightness` → 正常。这也是本滑块要接上的目标路径。
 
-**修法（构建步骤 6a-3，开关 `BRIGHTNESS_BRIDGE_ENV`，默认开）**：加用户级守护 `sheng-brightness-ac-bridge`，**双向**同步 —— `brightness-ac` 变化 → `setPrimaryBrightness(uint32)`（滑块能真正改亮度）；当前亮度 → 回写 `brightness-ac`（滑块位置反映真实亮度，即"监听当前亮度"）。**不碰任何二进制**。落地文件：`system_files_openkylin/usr/local/bin/sheng-brightness-ac-bridge`、`etc/systemd/user/sheng-brightness-ac-bridge.service`（enable 软链由构建为用户建）。
+**修法（构建步骤 6a-3，开关 `BRIGHTNESS_BRIDGE_ENV`，默认开）**：加用户级守护 `sheng-brightness-ac-bridge`，把两条路接起来：`brightness-ac` 变化 → `setPrimaryBrightness(uint32)`（滑块能真正改亮度）；当前亮度 → 回写 `brightness-ac`（滑块位置反映真实亮度）。**不碰任何二进制**。落地文件：`system_files_openkylin/usr/local/bin/sheng-brightness-ac-bridge`、`etc/systemd/user/sheng-brightness-ac-bridge.service`（enable 软链由构建为用户建）。
 - 守护**不在启动时主动施加**（`brightness-ac` 默认 `100.0`，登录时施加会把亮度顶满）；反向同步在 `brightness-ac` 连续变化（拖动）时被抑制、并有 ±3 容差，不会和拖动打架。
+- **⚠️ 反向同步（当前亮度 → `brightness-ac`）自 2026-10 起默认关闭**，见下节「转屏时亮度被顶到 100%」：`brightness-ac` 是 ukui-settings-daemon 的**输入键**，回写它会把 usd 的转屏故障"上膛"。要恢复旧行为设 `SHENG_BRIDGE_MIRROR=1`。正向（滑块 → 真实亮度）**未改动**，实测仍然有效（`brightness-ac=60 → primary=60`、`50 → 50`）。
 
 > ⚠️ 更正：早前（记忆 `sheng-brightness-reset-fix`）把「设置→显示器」也归为走 `setPrimaryBrightness` 是**错的**——实测它写的是 `brightness-ac`，正因如此才需要本桥接。
+
+### openKylin 3.0：转屏（横竖屏切换）时亮度被顶到 100%
+
+**症状**：横屏切竖屏（或反向）时，屏幕亮度**有时**被顶到很亮，甚至 `100%`。
+
+**定位过程与实证**（真机 `dbus-monitor` + dconf 写入字节解码 + 反复转屏守株待兔）：
+
+1. **不是** 构建补丁失效：`upmSupportAdjustBrightness` 在 daemon 与全部插件里都已是 `mov w0,#0; ret`；且把 `sheng-autobrightness` 与桥接都停掉后，反复转屏在 `30/20/55/62/95/100%` 下**一动不动**。补丁有效。
+2. **抓到一次现行**：`dbus-monitor` 全程只出现 **一次** 对 `brightness-ac` 的写入，其 dconf `Change` 负载解码为
+   key = `/org/ukui/power-manager/brightness-ac`，value = `0x4057000000000000`(double) = **92.0**，
+   发送者是一个**一次性连接**（`:1.596`）——即本仓库桥接的反向同步；紧随其后的 `setPrimaryBrightness(92)` 也是桥接的正向转发。
+3. **时间线**：桥接在 11:37:19 因亮度变成 59 而回写 `brightness-ac=59`（**给 usd 上膛**）→ 14 秒后转屏 → usd 重配置输出时**重新施加了这个"最近被写过"的 `brightness-ac`**，而本机的施加路径是坏的，把 59 放大成 **92**，再一次转屏变成 **100**（观测到 51→78、73→99、59→92→100 等多组）。停掉桥接后 `brightness-ac` 从不被写，故长时间转屏毫无反应——两端证据闭环。
+4. 叠加放大：新加的用户偏置会把这种跳变**当成手动调整学下来**（`manual brightness 100% ... -> user bias +42.0%`），于是屏幕**锁死在很亮**，这才是"有时候一直很亮"的原因。
+
+**修法（两层，均不碰二进制）**：
+
+- `sheng-brightness-ac-bridge`：**不再回写 `brightness-ac`**（反向同步改为 `SHENG_BRIDGE_MIRROR=1` 才开）。根因是写 usd 的输入键，去掉它就没有上膛源。代价仅是该滑块位置不再实时反映亮度。
+- `sheng-autobrightness`：轮询合成器输出几何（`ListAllOutputs` 的 `transform/scale/width/height/enabled`，**刻意不含 `brightness`**）来识别"屏幕重配置"。重配置后 `RECONF_WINDOW`（默认 5s）内出现的**外部亮度变化一律不学成偏置**，只记日志；若跳变 ≥ `GLITCH_JUMP`（默认 15）则**立即**纠正（绕过 `SETTLE`），所以屏幕只会闪一下而不是停在错误值。窗口外的手动调整照常学习（回归测试覆盖）。
+
+**仍存在的缺口（后续可做）**：控制中心「设置→显示器」滑块**自己**也会写 `brightness-ac`，所以拖过它之后仍可能给 usd 上膛一次。彻底修法是不让任何人写这个键：把 `ukui-control-center` 的 `libdisplay.so` 改成直接调 `setPrimaryBrightness`（或把它写的键改成本仓库自己的 gsettings 键，需一并提供 schema），那之后本桥接就可以整个删掉。届时 `sheng-autobrightness` 的重配置守卫仍作为兜底。
+
+> 回归测试：`tools/test-sheng-autobrightness-bias.py` 第 7 项模拟"重配置后 32→65"的跳变，断言**不学偏置**且**立即恢复 32**；第 8 项断言窗口过后的真实调整仍被学习（+18）。8/8 通过。
 
 ### openKylin 3.0：休眠时立即关背光（消除"黑屏但背光还亮"）
 
@@ -265,7 +351,9 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
      **你松手的那一刻就关屏**。下次按键时状态文件存在 → 合成器自己唤醒 + 我们补一发 `-d on`（空操作）→ 亮屏并删状态文件。
 - ⚠️ **打 `libmedia-keys.so` 补丁后需重启 `ukui-settings-daemon`**（它**没有 systemd 用户单元**，是会话 autostart：
   `pkill -f /usr/bin/ukui-settings-daemon` 后用会话环境重启）才生效。
-- ⚠️ **与自动转屏互斥**：`set_rotation`（`com.kylin.statusmanager.interface`）会做一次**输出重配置**，`kylin-wlcom` 会把它当成"活动"而把刚熄的屏**又点亮**（手持、非平放时才会转屏，故只在按电源键熄屏时撞见）。修法：`sheng-autorotate` 在熄屏期间（`/run/user/<uid>/sheng-panel-off` 存在，即 `sheng-screen-toggle` 建的那个）**跳过转屏**，屏亮后若朝向变了再补转（见 `system_files_openkylin/usr/local/bin/sheng-autorotate`）。注意 `org.ukui.ScreenSaver.GetBlankState` **不**反映 `kscreen-doctor` 的 DPMS、`/sys/class/drm/*/dpms` 也不变，所以用我们自己的状态文件最稳。
+- ⚠️ **与自动转屏互斥**：`set_rotation`（`com.kylin.statusmanager.interface`）会做一次**输出重配置**，`kylin-wlcom` 会把它当成"活动"而把刚熄的屏**又点亮**（手持、非平放时才会转屏，故只在按电源键熄屏时撞见）。修法：`sheng-autorotate` 在**面板已熄**时**跳过转屏**，屏亮后若朝向变了再补转（见 `system_files_openkylin/usr/local/bin/sheng-autorotate`）。
+  - 判据用**两个**：状态文件 `/run/user/<uid>/sheng-panel-off`（`sheng-screen-toggle` 在 `close-activation-enabled=false` 分支建的那个）**或**真实 DPMS 状态（`/sys/class/drm/*-DSI-1/dpms == "off"` 或 `/sys/class/backlight/*/bl_power != 0`，与 `sheng-fp-unlock-wake` 同一套读法）。
+  - ⚠️ **回归教训（2026-10 复现）**：只查状态文件**不够**。当「唤醒屏幕时需要密码」(`org.ukui.screensaver close-activation-enabled`，**息屏指纹解锁功能正需要它**) 为真时，`sheng-screen-toggle` 走 `ukui-screensaver-command --lock` 分支、**不再写状态文件** → 只查文件的旧守卫失效 → 转屏又把屏点亮（症状回归，实测 `kscreen-doctor -d off` 后 `set_rotation` 立刻把 `dpms` 从 Off 翻回 On）。DPMS 判据对**所有**熄屏路径都成立、且熄屏时由合成器置位、亮屏时自动清位，不依赖状态文件。注意 `org.ukui.ScreenSaver.GetBlankState` **不**可作判据（它不反映 `kscreen-doctor` 的 DPMS）。
 - **（顺带）"到点自动关屏"也要锁屏**：`ukui-powermanagement` 的 IdleWatcher 在到点关屏时本应执行 `ukui-screensaver-command -b idle`（锁屏），但它写成 `QProcess process; process.start("ukui-screensaver-command -b idle")` —— Qt 的 `QProcess::start(program)` **不按空格切分**（与 `system()` 不同），于是去执行一个**名字含空格**的"可执行文件"→ `FailedToStart` → **到点关屏从不锁屏**（只有电源键那条会锁）。构建步骤 6g 的 PART 3 把该程序串（`ukui-powermanagement` 内，唯一一处）改成无空格路径 `/usr/local/bin/sheng-idle-lock`；该包装脚本在 `close-activation-enabled` 为真时执行 `ukui-screensaver-command --lock`（**立即锁**；`-b idle` 是"延时锁屏"，刚熄灭马上点亮会免密）。落地文件 `system_files_openkylin/usr/local/bin/sheng-idle-lock`。⚠️ 打此补丁后需重启 `ukui-powermanagement`（会话 autostart；运行中改会 `ETXTBSY`，需先停掉、或改副本再 `mv`）。源码等价补丁见 `docs/patches/ukui-power-manager-idle-lock-screensaver.patch`。
 - 验证（实机）：下拉出现「关闭显示器」；选中后 `gsettings get … button-power` = `blank`、framework 属性 = `blank`；
   触发媒体键的 `POWER_OFF_KEY`（`busctl --user call org.ukui.SettingsDaemon /org/ukui/SettingsDaemon/MediaKeys
@@ -278,13 +366,59 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 - **内核侧**：只需 `fpc1553` 驱动 + `/dev/tee0`；真正干活的是签名 TA `fpcsheng`（配 QTEE 5.2 / `qcomtee`）。
 - **用户态栈**：上游 `ianchb/xiaomi-sheng-fingerprint`（纯用户态）—— `qteesupplicant`（MinkIPC/Mink 运行时）+ `libfpc1553-qtee.so`（FPC 协议后端）+ 一颗**含 fpc1553 驱动的私有 libfprint** + qtee-listeners + systemd 单元 + udev 规则。构建从 GitHub release 取 `xiaomi-sheng-fingerprint_0.1.4_arm64.deb`，用 `dpkg-deb --fsys-tarfile` 解开塞入（**不装 fprintd** —— Kylin 原生路径用不上）。
 - **Kylin 驱动接线**：Kylin `biometric-auth` 的多设备驱动（`goodixmoc.so` 等）其实是同一个 demo 模板，按**烤在 .so 里的驱动名**过滤 libfprint 设备。做法：`cp goodixmoc.so fpc1553.so` 并把偏移 `0x8430` 的 `goodixmoc` 改成 `fpc1553`；`biometric-drivers.conf` 追加 `[fpc1553]`；服务 drop-in `FP_FPC1553=1` + `LD_LIBRARY_PATH=/usr/lib/xiaomi-sheng-fingerprint`（让驱动用**兄弟目录那颗含 fpc1553 的私有 libfprint**）。
-- **两个自研补丁**（预编译二进制在 `fingerprint_payload/`，构建时覆盖）：
+- **自研补丁**（预编译二进制在 `fingerprint_payload/`，构建时覆盖；第 2 条可用 `tools/sheng-fp-thermal-off.sh` 复现/重打）：
   1. `libfprint-2.so.2.0.0` —— 改 fpc1553 驱动 `wait_for_finger_lift`：验证/识别**匹配到即上报**（不再等手指抬起）但**保留芯片 deep-sleep** → **按住即解锁**（原版必须松手才结算）。
-  2. `fpc1553.ko.zst` —— 去掉内核模块里**无条件**的 `irq_set_irq_wake`（指纹 IRQ 不再是唤醒源）→ **点休眠不再 ~1.8 秒自唤醒**。
+  2. `libfprint-2.so.2.0.0`（同一颗 so，另有 **2 字节**补丁）—— 关掉 libfprint 的**温度模型**（等价源码 `dev_class->temp_hot_seconds = -1`；上游 libfprint 里所有 match-on-chip 驱动 goodixmoc/fpcmoc/elanmoc/synaptics/realtek/focaltech **都显式关它**，本移植漏了 → 落回默认 **180 秒**）。**不关的后果（真机实测）**：息屏锁屏后，锁屏对话框在面板全黑时**每 30 秒重挂一次 Identify、永不停止**（`irq after reset` 每轮一次硬件复位）；累计 180 秒即判 HOT → 驱动返回 `FP_DEVICE_ERROR_TOO_HOT` → 框架报 `Device disabled to prevent overheating.` → 此后每次识别**瞬时失败**，而锁屏对话框把瞬时错误当成连续失败**并立即重试** → **几秒内烧完 `MaxFailedTimes=5`**，用户点亮屏幕即见「指纹失败，5 次机会全用完」。本驱动的空闲等待是 `poll()` + `fingerdown_wait` 的 **IRQ 事件**（不是忙轮询/连续拍照），所以这个估算模型对它过度保守，关掉是安全的。
+  3. `fpc1553.ko.zst` —— 去掉内核模块里**无条件**的 `irq_set_irq_wake`（指纹 IRQ 不再是唤醒源）→ **点休眠不再 ~1.8 秒自唤醒**。
 
 > ⚠️ **可维护性**：升级**内核**要重编 `fpc1553.ko`（vermagic 须精确匹配注入内核）；升级 `xiaomi-sheng-fingerprint` **包**会覆盖私有 `libfprint`。
 > ⚠️ **别删单个指纹模板**：`biometric-auth-client clean -i <单个>` 会让 Kylin 库与 TA 库失步 → 之后验证一直失败且**还原文件也救不回**。要改就"清空全部 + 重录一个"（`clean -i -1`）。
 > 💡 **速度**：比对耗时**正比模板数** —— 只保留 **1 个**（~1s；2 个约 3s）。设备 ID 用 `biometric-auth-client get-device-list` 查。
+
+**息屏指纹的完整行为（手机式：息屏时指纹一碰 → 解锁并亮屏）**
+
+- 息屏（面板 DPMS Off）期间锁屏对话框**一直武装着指纹** —— 这是要保留的，正是"息屏直接按手指解锁"的前提。
+- 指纹**匹配成功**时对话框**自己会解锁会话**（stock 行为）；但面板仍是 DPMS Off，用户看不到任何反馈，还得再按一次电源键。原因：**指纹触摸不是输入事件**，`kylin-wlcom` 只对触摸/电源键做 unblank，不会因为指纹而唤醒面板。
+- 补法：用户级守护进程 **`sheng-fp-unlock-wake`**（构建步骤 **6a-9**，开关 `FP_UNLOCK_WAKE_ENV`）。它监听会话总线 `org.ukui.ScreenSaver` 的 **`unlock` 信号**（并用 `GetLockState` 每秒轮询兜底），一旦发现「会话已解锁 **且** 内屏黑着」（`dpms==off` 或 `bl_power!=0`，两个指标互为冗余）就 `kscreen-doctor -d on`；**指纹不匹配时不动作**，保持黑屏（与手机一致）。日志在 `~/.log/sheng-fp-unlock-wake.log`。
+- 实机验证：息屏后碰手指 → 屏幕自动亮起进桌面，守护进程日志 `panel is OFF and session unlocked (unlock signal) -> turning panel on`（信号路径生效，非轮询兜底）。
+- ⚠ 该守护进程**只负责点亮**；"匹配→解锁"是锁屏对话框自己的事。
+
+**顺带修掉的一个系统问题**：镜像里的 `/dev/null` 可能是 `0755`（应为 `0666`，真机上实测如此）→ 普通用户写 `/dev/null` 直接失败，`cmd >/dev/null 2>&1` 这类重定向会让**整条命令被静默跳过**（本仓库多个 `sheng-*` 脚本都依赖该写法，例如 `sheng-screen-toggle` 里的关屏调用）。构建步骤 **6a-10** 把它纠正为 `0666`。
+
+### openKylin 3.0：文件管理器首次打开卡 ~10s + "peony程序无响应"
+
+构建步骤 **6a-6（开关 `PEONY_IDM_FIX_ENV`，默认跟随 `REMOVE_AI`）**。
+
+- **症状**：开机后**首次**点桌面「计算机」打开文件管理(peony) 卡 ~10s，随后合成器（`kylin-wlcom`）弹
+  「peony程序无响应（进程号XXX）是否强制关闭应用」。冷启动 10.6s、二次起 0.4s（只"首次"慢）。
+- **根因**：peony 首启会 D-Bus 激活 `com.peony.idm.service` → 用户服务
+  `peony-intelligent-data-management-service`（「智能空间/AI 分组」）。该服务连 Kylin AI 后端 socket
+  `/tmp/.kylin-ai-business-unix/1000/KnowledgeBaseService.sock` **每秒重试、10s 后放弃**（`kb_session_init`
+  失败）；peony **同步等**它就绪 → 主线程冻结 10s → wlcom 记 `peony view is not responding`。
+  （gdb 全线程栈显示主线程其实空在 `QCoreApplication::exec()→poll()`，**不是死锁**。）
+- **修法**：给 luser 建掩码软链
+  `~/.config/systemd/user/peony-intelligent-data-management-service.service -> /dev/null`（等价
+  `systemctl --user mask`；构建期没有用户 session，直接建软链）。激活立即失败 → peony 不再等 → **首开 10.4s→0.2s**。
+- **⚠️ 与 `REMOVE_AI` 耦合**：该服务**只在 kylin-ai 后端缺失**时才会白等 10s；后端在时「智能空间」正常。
+  故 `PEONY_IDM_FIX_ENV` **默认跟随 `REMOVE_AI`**（`if is_true "$REMOVE_AI"`）：`REMOVE_AI=1`（剥离 AI）→ 掩码；
+  `REMOVE_AI=0`（保留 AI）→ 不掩码。**别只翻一个**：把 AI 加回来却仍掩码 IDM → 智能空间依然起不来。
+- **"智能空间"不靠额外开关**：侧栏 `idm://` 根项（`IntelligentVFSInfoPlugin`，`displayName=Intelligent Space`）
+  和工具栏「新建」下拉项都**无条件添加、不受 `isAiAvailable()` 门控**（后者只用于搜索框渐变边框）——AI 在则列表
+  有内容，AI 不在则空壳。故恢复 AI 后（重建 `REMOVE_AI=0`，或设备上 `systemctl --user unmask
+  peony-intelligent-data-management-service.service`）**无需其他操作**即自动恢复；反之 AI 不在时**不要**unmask（会把 10s 卡顿带回来）。
+- 实机（无 AI 的设备）：AI 后端包（`kyai-data-management-service`/`kylin-ai-knowledge-base-service`/
+  `kylin-ai-runtime` 等）dpkg 状态为 `install ok config-files`（已卸载只剩配置），`/tmp/.kylin-ai-business-unix`
+  不存在 → 属 `REMOVE_AI=1` 建的，"无 AI + 掩码"即正确状态。
+
+### openKylin 3.0：文件管理器手指点不开文件夹（可滚动目录）—— 修 ukui 触摸手势
+
+构建步骤 **6a-7（开关 `GESTURE_SCROLL_FIX_ENV`，默认开）**，打库 `tools/sheng-gesture-scroll-fix.sh`。
+
+- **症状**：文件管理器里**鼠标**双击能打开文件夹，但**手指**在**条目多、需要滚动的目录**里怎么点都打不开；放得下、不滚动的目录正常（条目越少越容易开）。**平板模式**下能开（它会把窗口自动全屏 → 一行放得下更多、不滚动）。
+- **根因**：ukui 的手势插件 **`libqt5-gesture-extensions`**（由 ukui Qt 样式对每个 `QAbstractScrollArea` 自动 `registerWidget`）对滚动区 viewport 调 `QScroller::grabGesture(viewport, QScroller::TouchGesture)`；而 `grabGesture(TouchGesture)` 会顺带 `viewport->setAttribute(Qt::WA_AcceptTouchEvents)` —— **部件一旦接收触摸事件，Qt 就不再把它合成鼠标事件**。peony 靠**鼠标双击**打开 → 可滚动目录里"没有鼠标事件"→ 手指点不开。（放得下不滚动的目录 QScroller 不介入，仍走 Qt 合成 → 正常；鼠标不受影响。）该插件设的 `QScrollerProperties`（`MaximumClickThroughVelocity=0`）**无关**（实测改它无效）。
+- **修法**：把手势类型 **`TouchGesture`(0) → `LeftMouseButtonGesture`(1)**。于是不再设 `WA_AcceptTouchEvents` → 触摸重新被合成为鼠标（**双击成立、能打开**），而 QScroller 改为抓"鼠标拖拽 flick" → **一指拖动仍能滚动**。**两全**。
+- **实现**：就地打 `.so` 字节补丁（无需源码重编）。`SlideGesture::registerWidget` 里唯一的 8 字节序列 `mov w1,#0 ; mov x20,x0`（`01 00 80 52 f4 03 00 aa`）→ `mov w1,#1 ; …`（`21 00 80 52 f4 03 00 aa`）；按**字节模式**定位（不硬编码偏移）、幂等。等价源码：`qt5-gesture-extensions/gesture-extensions/slide-gesture.cpp` 的 `registerWidget()` 用 `QScroller::LeftMouseButtonGesture`。
+- ⚠️ 排查备忘：`QT_DBL_TAP_DIST`/`QT_DBL_CLICK_DIST`（=30，由 `libqt5-gesture-extensions1` 装的 `/etc/X11/Xsession.d/101qt-dist-threshold`）与"双击间隔(`org.ukui.peripherals-mouse double-click`)"**都不是**原因；`qt5-styles-ukui` 里的 `GestureHelper` 是**死代码**（`new` 被注释），也不是。
 
 ### 只构建 boot 镜像（轻量，不重建 rootfs）
 
@@ -312,6 +446,7 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 | **openKylin3：转屏 / 重启把屏幕亮度重置成最亮** | `ukui-settings-daemon` 只按 `/sys/class/backlight/*/brightness` 节点是否存在就认定“硬件背光可调”，把唯一内屏当笔记本内屏，**每次输出重配置（转屏）都把合成器亮度拉满到 100**；本平板 upm 其实调不了该节点（`CanSetBrightness=false`）。打补丁让 `UsdBaseClass::upmSupportAdjustBrightness()` 返回 false（`tools/sheng-usd-brightness-fix.sh`，步骤 6c；等价源码补丁见 `docs/patches/`）→ 改由合成器 gamma-manager 管亮度（值存 `/etc/ukui/usd/globalconf.ini [color]`），转屏/开机即保留，且无闪屏。见「openKylin 3.0：屏幕亮度 = 真实背光」 |
 | **openKylin3：调亮度后暗场景发灰（合成器软件亮度「滤镜」）** | gamma-manager 把用户值经 `GmHelper::normalizeBrightness` 映射后下发合成器 `com.kylin.Wlcom.Output.SetBrightness`，合成器对像素做乘法（`color *= brightness`）= 滤镜，压暗部。构建把 `normalizeBrightness`/`denormalizeBrightness` 钉成**常量 100**（`mov w0,#100; ret`，步骤 6c），亮度改由**真实面板背光**承担：`sheng-panel-brightness` 引擎（步骤 6a-5）监视 `globalconf.ini [color]` → 写 `/sys/class/backlight/ktz8866-backlight`。旧的 `sheng-backlight-fixed`（钉死背光）已移除。见「openKylin 3.0：屏幕亮度 = 真实背光」 |
 | **openKylin3：「设置→显示器」亮度滑块拖动无效** | `libdisplay.so` 的 `Widget::isSetGammaBrightness()` 本机恒 false → 滑块只写 gsettings `brightness-ac`（upm 硬件路），而 upm 驱动不了 ktz8866（`RegulateBrightness` 返回 `"no effective node"`）→ 无效；侧栏走 `setPrimaryBrightness`（gamma）故正常。构建装 `sheng-brightness-ac-bridge`（步骤 6a-3）监听 `brightness-ac` → 转发 `setPrimaryBrightness`。见「openKylin 3.0：「设置 → 显示器」亮度滑块」 |
+| **openKylin3：转屏（横竖屏）时亮度被顶到很亮 / 100%** | usd 在**输出重配置**时会重新施加**最近被写过**的 gsettings `brightness-ac`，而本机该施加路径损坏：把值**放大**（实测 51→78、73→99、59→92→100）。`brightness-ac` 是 usd 的**输入键**，写它即"上膛"；上膛源是本仓库桥接的反向同步（真机抓到唯一一次 dconf 写入即它写的 `brightness-ac=92.0`）。修法：桥接**不再回写** `brightness-ac`（`SHENG_BRIDGE_MIRROR=1` 才开）；`sheng-autobrightness` 识别输出重配置并拒绝把随之而来的跳变学成"用户偏置"，且立即纠正。见「转屏时亮度被顶到 100%」 |
 | **openKylin3：缩放屏幕最大只到 225%（选不到 250% / 275%）** | 同一 `libdisplay.so` 的 `OutputConfig::initScaleItem()` 用**硬编码分辨率阈值**加档：`250%` 只在当前分辨率宽度 **>3072**、`275%` 只在 **>3840** 时才 `addItem`，而本机面板原生 **3048×2032**（3048 不大于 3072/3840）→ 下拉框最大只到 225%（225% 的闸门是 >2560，3048 满足）。构建把 250%/275% 闸门 `cmp w0,#0xc00(3072)` / `#0xf00(3840)` 都改成 `#0xa00(2560)`（`install_display_scale`，步骤 6a-4；两种闸门各 3 处全替换）。合成器(wlcom)本身支持 2.5/2.75 分数缩放（实测 `kscreen-doctor output.DSI-1.scale.2.5` 生效、几何随之变化） |
 | **openKylin3：休眠时"黑屏但背光还亮一会"** | logind 先发 `PrepareForSleep(true)`（合成器立即关输出=黑屏，不动背光），再等一批 delay inhibitor 放行才真正 suspend；背光要等内核 suspend 才被 DSI 面板/`ktz8866` 驱动切断。构建装系统级 `sheng-suspend-backlight`（步骤 6e）监听 `PrepareForSleep`：`true`→背光写 0，`false`→还原。见「休眠时立即关背光」 |
 | **openKylin3：息屏后电源键"要等一会才响应"** | logind 等 `kylin-process-manager` 的 sleep delay 锁，硬等满 `InhibitDelayMaxSec`（默认 5s）才强制挂起；这 5s 屏幕黑但系统没睡，电源键无效。构建步骤 6f 装 logind drop-in 设 `InhibitDelayMaxSec=1`。见「休眠时立即关背光」 |
@@ -332,6 +467,10 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 | **openKylin3：系统更新失败**（装通用内核时报错） | openKylin 是 ostree 部署；`ostree` 包把 `/etc/kernel/{postinst,postrm}.d/zz-ostree-update` 当内核钩子，在**非 ostree**（摊平 ext4）系统上报 `system not ostree type` 并 **exit 1** → 通用内核 `linux-image-*-generic` 的 postinst 失败 → 整个更新失败。构建把该钩子改成 **no-op**（步骤 5g） |
 | **openKylin3：更新界面显示 `openKylin No section:'SYSTEM'`** | 镜像自带的 `/usr/lib/system-info/kylin-system-version.conf` 是 **0 字节** → `kylin-system-updater` 取 `[SYSTEM]` 段失败（`NoSectionError`）→ 界面把异常串当版本号打印。构建补 `[SYSTEM]` 段（步骤 5g） |
 | **openKylin3：每次更新都换通用内核**（~100MB initrd，对 sheng 无用） | 镜像带 `linux-generic`；对 sheng 无意义（引导的是 sheng mainline 内核）。构建 `apt-mark hold linux-generic linux-image-generic linux-headers-generic`（步骤 5g，best-effort） |
+| **openKylin3：重启后双击输入框打不开键盘**（偶发；且此前完全不可观测） | fcitx5 有 autostart 与 **D-Bus 按需激活**两条启动路径，`org.fcitx.Fcitx5` 总线名只能被一方抢到，输的一方退出（`Unable to request dbus name. Is there another fcitx already running?`）。原先只有 autostart 那条带 `LD_PRELOAD=sheng-osk-gate.so`，而登录时 `kylin-virtual-keyboard` 先来要名字、**常常是 D-Bus 激活赢** → fcitx5 裸启动 → 垫片没进 → 没人写 `sheng-osk-textactive` → 守护 `sheng-osk-tap.py` 把每次双击都正确识别后又 `skip (no text field focused)`。构建步骤 6a-8 现在让**两条路径都 exec 包装脚本 `fcitx5-sheng`**，并把守护 stderr 落到 `/tmp/osk-tap/tap.log`（`sheng-osk-tap-run`）。见「openKylin 3.0：屏幕键盘」→「启动顺序陷阱」 |
+| **openKylin3：屏幕键盘弹出偏慢**（每次弹出都重建视图）（**已试后撤销**） | `kylin-virtual-keyboard` 的 QML 视图按 gsettings `preload-view-enabled` 决定复用还是销毁，上游默认 **false** → 每次弹出都重建 `QQuickView` + 重载主题 + 编译着色器（源码 `virtualkeyboardview.cpp` 的 `initView()`/`destroyView()`）。真机实测 `show→可见` 0.43/0.53/0.51s（false）→ 0.34/0.36/0.32/0.31s（true，约快 38%）；剩余 ~300ms 是合成器上屏（DSI-1, scale 2.5），关动画无效。**曾装 `99-sheng-osk.gschema.override` 打开该键，但 true 会命中下一行的转屏缺陷，两者连锁问题多于收益 → 已撤销**，现在保持上游默认（慢一点但行为干净） |
+| **openKylin3：转屏后屏幕键盘尺寸不自适应**（「键盘收起时转屏、再打开」尺寸不对；「键盘开着时转屏」却正常）（**只诊断，未修**） | 几何是**实时**算的（`geometrymanager.cpp:54` → `expansionsgeometrymanager.cpp:24` → `screenwatcher.cpp:39` 直接读 `QScreen::geometry()`），转屏事件也**正常发出**（`screenwatcher.cpp:241`）。问题在**施加**环节被可见性闸门挡住：`virtualkeyboardmanager.cpp:274` 与 `virtualkeyboardview.cpp:102` 都有 `if (!isVisible()) return;`，而唯一无条件施加几何的 `virtualkeyboardview.cpp:196 view_->setGeometry(calculateInitialGeometry())` 在 `:150` 因 `preloadViewEnabled` **提前 return 而再不执行** → 窗口尺寸冻结在视图创建那一刻。**注意：该症状只在 `preload-view-enabled=true` 时出现**；上游默认 `false` 时每次弹出销毁+重建视图、重走 `:196`，所以「收起转屏再打开」是**自适应的**。曾用运行时守护 `sheng-osk-rotate`（转屏时重启键盘重建几何）让两者并存，但引出「键盘可见时被误杀/限流锁死/重建后不可用窗口」等问题，**已全部撤销**。真正的上游级修法是一行补丁：视图复用时若屏幕算出的尺寸与窗口现有尺寸不同则重设几何（只比尺寸以保留滑入动画）——未编进镜像（设备无 `qtbase5-dev`） |
+| **openKylin3：屏幕键盘 SIGSEGV 偶发崩溃**（上游 bug，未修） | `coredumpctl` 里有 20+ 次 `kylin-virtual-keyboard` SIGSEGV，栈顶是 `QWindow::screen()` 空指针（`← QTimer::timeout`），对应 `waylandworkspaceadjuster.cpp:57` 的 `surfaceWindow_->screen()`：`screenwatcher` 的旋转/几何变更定时器回调时 `QWindow` 已销毁。同文件 `:34`/`:54` 都有判空，唯独 `:57` 漏了。属上游 openKylin 问题（[issues](https://gitee.com/openkylin/kylin-virtual-keyboard/issues)），设备无 Qt5 dev 包无法本地编译验证 |
 | **刷完分区没撑满** | fstab 加 `x-systemd.growfs`（首启自动扩容） |
 | **要做单次解压**（GitHub zip + 7z 双层） | 直接输出 sparse `.img`，Release 走 `.img.gz` 分卷 |
 | **屏幕键盘难用 / 皮肤·尺寸不对** | dconf 系统默认（`system_files/etc/dconf/db/local.d/00-sheng-onboard`）：onboard 停靠底部 + **Blackboard 皮肤 / Small 布局** + 自动弹出；`window-handles=''` 防多指滑动误改大小。**两个前提缺一不可**：(1) 必须 `dconf update` 编译（需 `dconf-cli`，构建里装）——否则 `/etc/dconf/db/local` 根本不生成、默认静默失效（gsettings 一直报 `unable to open /etc/dconf/db/local`）；(2) `use-system-defaults=true`——onboard 该键（schema 默认 true，含义“先从系统默认读配置、首启后自动重置”）设成 false 就永不读系统默认、转而用 onboard 自带默认，皮肤尺寸全不对 |
@@ -382,6 +521,91 @@ openKylin 官方 arm64 镜像提取用户态**（live apt 归档不全，装不�
 - **DDE 会话**：脚本 best-effort 配了 lightdm 自动登录；若 Deepin 25 用的不是
   lightdm，该文件无害。
 - **首次启动**：fstab 已带 `x-systemd.growfs`，开机**自动**把根撑满分区（无需手动）。根分区是 `PARTLABEL=linux`（如 `/dev/sda31`，**不是** `sda30`）；只有旧镜像才需手动 `sudo resize2fs <根设备>`。
+
+### openKylin 3.0：屏幕键盘「双击输入框弹出」（停用一聚焦就自动弹）
+
+屏幕键盘是 **`kylin-virtual-keyboard`**（由 **fcitx5** 驱动）。它本来**只要文本输入框获得焦点就自动弹**
+（走 `fcitx::UserInterfaceManager::showVirtualKeyboard()`，受 `virtualKeyboardAutoShow` 默认 true 控制）
+——**界面打开自动聚焦、微信切好友**时都会弹（用户没点输入框）。改成：**只有双击、且当前有输入框聚焦时才弹**。
+
+**做法（构建步骤 6a-8，开关 `OSK_TAP_ENV`，默认开）**：
+
+- **fcitx5 侧垫片 `sheng-osk-gate.so`**（`LD_PRELOAD` 进 fcitx5，源码 `tools/sheng-osk-gate.c`，**预编译 arm64**）：
+  - 把 `_ZNK5fcitx20UserInterfaceManager19showVirtualKeyboardEv` 空实现 → **拦掉自动弹出**；
+  - 同时用它的 show/hide 请求维护「当前是否有输入框聚焦」：`showVirtualKeyboard`→`$XDG_RUNTIME_DIR/sheng-osk-textactive=1`，
+    `hideVirtualKeyboard`（文本框失焦）→`=0`。
+  - （反汇编确认这两个调用都走 `@plt`，可被 preload 拦。）
+- **守护 `sheng-osk-tap.py`**（`/usr/local/bin/`，**以用户跑**）：只读触摸屏 `/dev/input/event3`
+  （`NVTCapacitiveTouchScreen`, MT-B，**不抢事件**）识别**双击**（两次干净单击，各 down..up ≤0.35s、位移 ≤260 单位；
+  两击间隔 ≤0.45s、距离 ≤350 单位）；双击时**仅当** `sheng-osk-textactive=1` 且键盘没显示 → 调
+  `org.fcitx.Fcitx5 /virtualkeyboard org.fcitx.Fcitx.VirtualKeyboard1 ShowVirtualKeyboard` 弹出。
+- **自启：`fcitx5` 有两条启动路径，两条都必须带垫片** ⚠️（见下面「启动顺序陷阱」）。
+  现在两条都 `exec` 同一个包装脚本 `/usr/local/bin/fcitx5-sheng`（内含 `LD_PRELOAD`）：
+  `/etc/xdg/autostart/fcitx5.desktop` 与 `/usr/share/dbus-1/services/org.fcitx.Fcitx5.service` 的
+  `Exec=` **都**是 `/usr/local/bin/fcitx5-sheng`；新增
+  `/etc/xdg/autostart/sheng-osk-tap.desktop` → `/usr/local/bin/sheng-osk-tap-run`（包装，落日志）拉起守护。
+- **本目录只做这一件事**：双击输入框弹出键盘（外加停用"一聚焦就自动弹"）。
+  曾试验并已**全部撤销**的两项（问题多于收益，用户决定回到原始状态）：
+  1. **键盘视图预加载**（gsettings `preload-view-enabled=true` + 系统级
+     `99-sheng-osk.gschema.override`）：让展开快约 38%（0.51→0.34s），但视图复用后
+     **窗口尺寸冻结在创建那一刻** → 「收起键盘→转屏→再打开」不自适应。
+  2. **转屏守护 `sheng-osk-rotate`**：1Hz 读 `com.kylin.statusmanager.interface.get_current_rotation`，
+     只在「方向变了且键盘隐藏」时重启键盘进程以重建几何，用来兜住上面那条。
+     它确实能让两者并存，但引入了多轮新问题（曾误杀可见键盘→"转屏后键盘自动收起"；
+     限流参数过紧→"转屏后一段时间不再重建"；以及重建后键盘有"启动中不可用"的窗口）。
+     守护文件、unit、上游补丁、gschema override 均已从构建移除，应从仓库删除。
+     顺带记录：键盘本身有已知崩溃（`screenwatcher` 旋转回调里 `QWindow::screen()` 空指针，
+     多发生在**转屏瞬间**），所以「方向变化 + 进程消失」会撞在一起，任何重建方案都得先解决这个。
+- 落地文件：`system_files_openkylin/usr/local/lib/sheng-osk-gate.so`、
+  `system_files_openkylin/usr/local/bin/sheng-osk-tap.py`、
+  `system_files_openkylin/usr/local/bin/{fcitx5-sheng,sheng-osk-tap-run}`、
+  `system_files_openkylin/usr/share/dbus-1/services/org.fcitx.Fcitx5.service`、
+  `system_files_openkylin/etc/xdg/autostart/{fcitx5.desktop,sheng-osk-tap.desktop}`、
+  `tools/sheng-osk-gate.c`。
+
+> **效果**：界面打开自动聚焦 / 微信切好友 → **不弹**（单击好友、点按钮、滚动、双击文件夹都不弹，
+> 因为那些时刻 `sheng-osk-textactive=0`）；**双击输入框 → 弹**。
+
+#### 启动顺序陷阱：垫片「有时在、有时不在」（真机踩过，2026-10-09 定位）
+
+**症状**：重启后双击输入框**没反应**，且表现为**偶发**——有的开机正常、有的必坏；此前一直查不出，
+因为守护 stderr 被丢进 `/dev/null`，整个链路不可观测。
+
+**根因**：`fcitx5` 有两条启动路径，而 `org.fcitx.Fcitx5` 这个总线名**只能被一方抢到**，输的一方
+直接退出并卸载 addon（日志表现为
+`addonloader.cpp: Failed to create addon: dbus Unable to request dbus name. Is there another fcitx already running?`）：
+
+1. `/etc/xdg/autostart/fcitx5.desktop` → systemd `app-fcitx5@autostart.service`
+2. `/usr/share/dbus-1/services/org.fcitx.Fcitx5.service` → **D-Bus 按需激活**。登录时
+   `kylin-virtual-keyboard` 会先来要这个名字，所以**常常是这条赢**。
+
+原先**只有 (1) 带 `LD_PRELOAD`**。于是 (2) 赢的那些开机里 fcitx5 是**裸启动**的：垫片没进 →
+没人写 `sheng-osk-textactive`（**文件根本不存在**）→ 守护把每次双击都正确识别后又按设计
+`skip (no text field focused)` → **键盘根本弹不出来**。
+
+**修法**：两条路径都 `exec` 包装脚本 `fcitx5-sheng`（内含 `LD_PRELOAD`），谁先赢都带垫片。
+注意 `Exec=env LD_PRELOAD=… /usr/bin/fcitx5` **不能**直接写进 D-Bus 激活文件（那会变成去执行名为
+`env` 的程序）；desktop 文件里也不能把 shell 逻辑塞进 `Exec=`（desktop-entry(5) 不允许未引用的
+`;` `$` `&` `>` 和 `%` 字段码，`desktop-file-validate` 会报错），所以逻辑必须落在包装脚本里。
+
+**教训（排查手段）**：守护 stderr 必须落盘。现在由 `sheng-osk-tap-run` 写到 `/tmp/osk-tap/tap.log`
+（含 `--- session start ---` 与每次 `tap` / `double-tap … -> show|skip(原因)`），
+一眼就能区分「双击没识别」和「识别了但被 skip」。
+
+> **排查/调参**：垫片把 show/hide 记到 `$XDG_RUNTIME_DIR/sheng-osk-req.log`，标记写 `…/sheng-osk-textactive`
+> （该文件在 `/run/user/1000/`，**会话结束即清空**，所以每次开机都从 0 开始 —— 这是设计，不是 bug）；
+> 守护把每次点击/双击写到 `/tmp/osk-tap/tap.log`。阈值在 `sheng-osk-tap.py` 顶部
+> （触摸单位 ≈0.1px，所以 `DBL_TAP_DIST=350` 实际只有 **35px**、`MAX_TAP_MOVE=260` 只有 **26px**；
+> 觉得"手抖就不认"就调大）。
+> **撤销**：还原 `/etc/xdg/autostart/fcitx5.desktop`（备份 `fcitx5.desktop.orig.bak`）、还原
+> `/usr/share/dbus-1/services/org.fcitx.Fcitx5.service`（设备上手工改的备份是
+> `…service.pre-gate.bak`）、删 `sheng-osk-tap.desktop`、删
+> `fcitx5-sheng` / `sheng-osk-tap-run` / `sheng-osk-tap.py` / `sheng-osk-gate.so`、重启会话。
+
+> 本目录**不含**键盘弹出提速与转屏自适应：曾做过「视图预加载 + 转屏守护」两项，实测确实能让
+> 展开快约 38% 且「收起转屏再打开」跟随尺寸，但连锁引出的问题（键盘可见转屏被误杀、限流锁死
+> 正常转屏、重建后有一段"启动中不可用"窗口）多于收益，已按决定全部撤销。若将来要重做，
+> 优先走**上游一行补丁**（视图复用时按当前屏幕重设几何）而不是运行时守护。
 
 ## 无线调试（ssh over WiFi / USB 网络）
 

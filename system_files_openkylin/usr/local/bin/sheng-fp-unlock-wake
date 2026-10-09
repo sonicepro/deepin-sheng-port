@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+# sheng-fp-unlock-wake
+# ---------------------------------------------------------------------------
+# 息屏（面板 DPMS Off）状态下用指纹解锁后，自动点亮屏幕。
+#
+# 背景
+#   sheng-idle-lock / sheng-screen-toggle 在“唤醒屏幕时需要密码”打开时，会先
+#   `ukui-screensaver-command --lock` 再关屏。锁屏对话框在息屏期间一直武装着指纹
+#   （ukui-screensaver-dialog 每 30 秒重挂一次 Identify）；指纹匹配成功时对话框会
+#   解锁会话，但面板仍是 DPMS Off —— 用户看不到任何反馈，还得再按一次电源键。
+#   指纹触摸**不是输入事件**，kylin-wlcom 不会因此唤醒面板，所以必须自己点屏。
+#
+# 做法
+#   监听会话总线上 org.ukui.ScreenSaver 的 `unlock` 信号（并用 GetLockState
+#   每秒轮询兜底），一旦发现「会话已解锁但面板还是黑的」，就调用
+#   `kscreen-doctor -d on` 点屏 —— 即手机式「指纹一碰就亮屏进桌面」。
+#
+# 只处理解锁；指纹不匹配时保持黑屏（与手机一致）。
+# ---------------------------------------------------------------------------
+import glob
+import os
+import subprocess
+import sys
+import time
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+BUS_NAME = "org.ukui.ScreenSaver"
+OBJ_PATH = "/"
+IFACE = "org.ukui.ScreenSaver"
+KSCREEN = "/usr/bin/kscreen-doctor"
+LOG = os.path.expanduser("~/.log/sheng-fp-unlock-wake.log")
+LOG_MAX = 256 * 1024
+DEBOUNCE = 3.0          # seconds; ignore repeated wake requests
+POLL_MS = 1000
+
+_state = {"conn": None, "locked": None, "last_wake": 0.0}
+
+
+def log(msg):
+    line = "%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+    try:
+        if os.path.exists(LOG) and os.path.getsize(LOG) > LOG_MAX:
+            open(LOG, "w").close()
+        with open(LOG, "a") as fh:
+            fh.write(line)
+    except OSError:
+        pass
+    sys.stderr.write(line)
+    sys.stderr.flush()
+
+
+def panel_dpms_nodes():
+    nodes = ["/sys/class/drm/card0/card0-DSI-1/dpms"]
+    nodes += sorted(glob.glob("/sys/class/drm/card*-DSI-1/dpms"))
+    seen, out = set(), []
+    for n in nodes:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _read(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def panel_is_off():
+    """True if the internal panel is blanked, i.e. the user sees nothing.
+
+    Two independent indicators, because either one alone can lag behind:
+      * /sys/class/drm/.../dpms          -> "Off"
+      * /sys/class/backlight/*/bl_power  -> non-zero (FB_BLANK_*)
+    """
+    for node in panel_dpms_nodes():
+        if (_read(node) or "").lower() == "off":
+            return True
+    for node in sorted(glob.glob("/sys/class/backlight/*/bl_power")):
+        val = _read(node)
+        if val is not None and val.isdigit() and int(val) != 0:
+            return True
+    return False
+
+
+def panel_on():
+    env = dict(os.environ)
+    env.setdefault("QT_QPA_PLATFORM", "wayland")
+    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+    try:
+        subprocess.Popen([KSCREEN, "-d", "on"], env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except OSError as exc:
+        log("kscreen-doctor failed: %s" % exc)
+        return False
+
+
+def get_locked(conn):
+    res = conn.call_sync(BUS_NAME, OBJ_PATH, IFACE, "GetLockState", None, None,
+                         Gio.DBusCallFlags.NONE, 2000, None)
+    return bool(res.unpack()[0])
+
+
+def wake_if_dark(why):
+    if not panel_is_off():
+        return
+    now = time.monotonic()
+    if now - _state["last_wake"] < DEBOUNCE:
+        return
+    _state["last_wake"] = now
+    log("panel is OFF and session unlocked (%s) -> turning panel on" % why)
+    panel_on()
+
+
+def on_signal(conn, sender, path, iface, signal, params):
+    try:
+        if not get_locked(conn):
+            wake_if_dark("unlock signal")
+    except Exception as exc:
+        log("unlock signal but GetLockState failed: %s" % exc)
+    return None
+
+
+def poll():
+    conn = _state["conn"]
+    try:
+        locked = get_locked(conn)
+    except Exception:
+        return True
+    prev = _state["locked"]
+    _state["locked"] = locked
+    if prev is True and locked is False:
+        wake_if_dark("lock state true->false")
+    return True
+
+
+def main():
+    log("starting (pid %d)" % os.getpid())
+    conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    _state["conn"] = conn
+    conn.signal_subscribe(BUS_NAME, IFACE, "unlock", OBJ_PATH, None,
+                          Gio.DBusSignalFlags.NONE, on_signal)
+    try:
+        _state["locked"] = get_locked(conn)
+    except Exception as exc:
+        log("initial GetLockState failed: %s" % exc)
+    GLib.timeout_add(POLL_MS, poll)
+    GLib.MainLoop().run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

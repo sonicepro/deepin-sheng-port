@@ -15,14 +15,44 @@
 #   gated and disabled: "no effective node"). The quick-settings / sidebar
 #   slider works because it calls setPrimaryBrightness directly (gamma path).
 #
-# This bridge ties the two together, in both directions:
+# This bridge ties the two together:
 #   A) brightness-ac changes  ->  setPrimaryBrightness(value)   (make the
 #      Display slider actually change the screen).
 #   B) current UKUI brightness ->  brightness-ac               (make the Display
 #      slider reflect the real brightness, e.g. after the sidebar / quick
-#      settings / auto-brightness changed it -- i.e. "listen to current
-#      brightness").
+#      settings / auto-brightness changed it).  [OFF BY DEFAULT -- see below]
 # No binary patching.
+#
+# ---------------------------------------------------------------------------
+# WHY DIRECTION B IS OFF BY DEFAULT (2026-10, "rotation blasts to 100%")
+# ---------------------------------------------------------------------------
+# `brightness-ac` is not a neutral output of ours: it is ukui-settings-daemon's
+# *input* (the power policy's "brightness when on AC"). usd re-applies a
+# recently written `brightness-ac` whenever the outputs are reconfigured, and on
+# sheng that apply path is broken -- it inflates the value.
+#
+# Measured with dbus-monitor plus a full dconf-write capture on the device: in a
+# rotation that took the screen from 59% to 92% and then to 100%, the ONLY write
+# to `brightness-ac` in the entire capture was this bridge's direction B (the
+# dconf Change payload decoded to key
+# `/org/ukui/power-manager/brightness-ac`, double value 92.0). Conversely, with
+# this bridge stopped, `brightness-ac` was never written and rotations at
+# 30/20/55/62/95/100% moved nothing at all. So direction B is what arms the
+# glitch, and a later rotation (observed up to ~15s afterwards) detonates it.
+#
+# Direction B is only a cosmetic nicety (the control-center Display slider
+# showing the current level), which is not worth a screen that slams to 100% on
+# rotation, so it now defaults OFF. Set
+#     SHENG_BRIDGE_MIRROR=1
+# (e.g. via a systemd drop-in) to restore the old behaviour. Direction A -- the
+# half that makes that slider actually work -- is unchanged and only writes when
+# the user really moves the slider.
+#
+# Note that the Display slider is still an arming source by itself: dragging it
+# makes ukui-control-center write `brightness-ac`. sheng-autobrightness covers
+# that case by refusing to learn a brightness change that follows a display
+# reconfiguration, and by correcting it immediately (see the ROTATION GLITCH
+# section in that daemon).
 #
 # No initial apply: brightness-ac defaults to 100.0; applying it at login would
 # peg the screen to maximum. We only act on changes (A) and on live brightness
@@ -46,6 +76,11 @@ IFACE = "org.ukui.SettingsDaemon.Brightness"
 POLL = 1.0        # seconds between reading the current brightness (direction B)
 STABLE = 2.5      # don't reflect while brightness-ac changed within this window
 TOL = 3           # only reflect when |current - brightness-ac| >= this
+
+# Direction B writes ukui-settings-daemon's own input key, which arms the
+# rotation glitch -- opt-in only. See the header.
+MIRROR = os.environ.get("SHENG_BRIDGE_MIRROR", "0").lower() \
+    in ("1", "true", "yes", "on")
 
 DEBUG = "--debug" in sys.argv or bool(os.environ.get("SHENG_BRIDGE_DEBUG"))
 
@@ -172,9 +207,18 @@ def reflect_loop():
 
 
 def main():
-    warn("started (pid %d)%s" % (os.getpid(), " [debug]" if DEBUG else ""))
-    threading.Thread(target=monitor_loop, daemon=True).start()
-    reflect_loop()
+    warn("started (pid %d)%s%s" % (
+        os.getpid(), " [debug]" if DEBUG else "",
+        "" if MIRROR else " [direction B off: not mirroring into brightness-ac, "
+                          "which would arm usd's rotation glitch]"))
+    # Direction A always runs: it is what makes the control-center Display
+    # slider work. Direction B is what arms ukui-settings-daemon's rotation
+    # glitch, so it is opt-in (SHENG_BRIDGE_MIRROR=1). See the header.
+    if MIRROR:
+        threading.Thread(target=monitor_loop, daemon=True).start()
+        reflect_loop()
+    else:
+        monitor_loop()
 
 
 if __name__ == "__main__":

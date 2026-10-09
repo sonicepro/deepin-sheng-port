@@ -1,0 +1,40 @@
+#!/bin/sh
+# fcitx5-sheng — start fcitx5 with the sheng OSK gate preloaded.
+#
+# WHY THIS WRAPPER EXISTS
+#   sheng-osk-gate.so is an LD_PRELOAD shim for sheng-osk-tap.py (the
+#   "double-tap a text field to open the on-screen keyboard" feature).  Its
+#   fcitx::UserInterfaceManager::showVirtualKeyboard() marks "a text field is
+#   focused" by writing $XDG_RUNTIME_DIR/sheng-osk-textactive=1, and swallows the
+#   automatic pop.  sheng-osk-tap.py opens the keyboard on a deliberate
+#   DOUBLE-tap *only* while that file reads "1".
+#
+#   fcitx5 can be started two ways here, and only ONE of them wins the
+#   org.fcitx.Fcitx5 bus name; the loser exits and unloads its addons:
+#
+#     1. /etc/xdg/autostart/fcitx5.desktop -> systemd
+#        app-fcitx5@autostart.service
+#     2. /usr/share/dbus-1/services/org.fcitx.Fcitx5.service -> D-Bus activation.
+#        kylin-virtual-keyboard requests the name early at login, so on many
+#        boots THIS path wins.
+#
+#   The autostart entry used to be the only one with the LD_PRELOAD, so on the
+#   boots where D-Bus activation won, fcitx5 ran WITHOUT the gate:
+#       - showVirtualKeyboard() was never intercepted
+#       - $XDG_RUNTIME_DIR/sheng-osk-textactive was never created
+#       - sheng-osk-tap.py classified every double-tap correctly and then
+#         skipped it with "skip (no text field focused)"
+#   i.e. the keyboard would not open on double-tap at all.  Symptom was
+#   non-deterministic across reboots because it depended on which path came
+#   first, and it was invisible because the daemon's stderr went to /dev/null.
+#
+#   Both paths now exec THIS wrapper, so the gate is loaded either way.
+#
+# UNDO
+#   Restore /usr/share/dbus-1/services/org.fcitx.Fcitx5.service from
+#   /usr/share/dbus-1/services/org.fcitx.Fcitx5.service.pre-gate.bak, set the
+#   autostart Exec= back to /usr/bin/fcitx5, and remove this file.
+#
+# See sheng-openkylin3-rootfs_build.sh -> install_osk_tap().
+
+exec /usr/bin/env LD_PRELOAD=/usr/local/lib/sheng-osk-gate.so /usr/bin/fcitx5 "$@"

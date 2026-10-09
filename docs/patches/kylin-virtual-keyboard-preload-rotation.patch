@@ -1,0 +1,83 @@
+kylin-virtual-keyboard: keep the keyboard sized to the screen when the view is
+preloaded (fixes "rotate while hidden, then open -> stale size")
+
+STATUS: this is an UPSTREAM-GRADE fix, not a required step for sheng images.
+sheng already works around the bug at runtime with the sheng-osk-rotate daemon
+(install_osk_tap step 5: when the orientation changed while the keyboard was
+hidden, restart the keyboard process so the view is rebuilt at the current
+orientation).  Apply this patch only if you are rebuilding the keyboard -- e.g.
+to hand it to openKylin upstream, or to drop the daemon afterwards
+(build with OSK_ROTATE_ENV=0 while keeping OSK_PRELOAD_ENV=1).
+
+sheng/openKylin 3.0 regression analysis (device 192.168.5.15, 2026-10-09).
+
+Symptom
+-------
+With gsettings org.ukui.virtualkeyboard preload-view-enabled=true:
+  * rotate the screen while the keyboard is OPEN  -> it resizes correctly
+  * hide the keyboard, rotate, then open it again -> the keyboard keeps the
+    size of whatever orientation was active when its view was created
+With preload-view-enabled=false (the upstream default) both work, because the
+view is destroyed on hide and rebuilt on show, and initView() applies a fresh
+geometry every time.
+
+Root cause
+----------
+The geometry is computed live on every call:
+  geometrymanager.cpp:54        geometry() -> QRect(calculateViewPosition(), calculateViewSize())
+  expansiongeometrymanager.cpp:24  calculateViewWidth() -> ScreenWatcher::getOptimalScreenGeometry(...).width()
+  screenwatcher.cpp:39          getOptimalScreenGeometry() -> QScreen::geometry()
+and the rotation event itself is emitted correctly:
+  screenwatcher.cpp:241         if (screenMarked) emit screensChanged();
+
+but the *application* of that geometry to the window is gated on visibility:
+  virtualkeyboardmanager.cpp:274  if (!view_->isVisible()) return;   // handleScreensChanged
+  virtualkeyboardview.cpp:102     if (!isVisible()) return;         // updateGeometry()
+
+so rotating while the keyboard is hidden does nothing.  The one place that
+applies a fresh geometry unconditionally is initView():
+  virtualkeyboardview.cpp:196     view_->setGeometry(calculateInitialGeometry());
+
+and with preload enabled initView() bails out early on every later show:
+  virtualkeyboardview.cpp:150     if (view_ != nullptr && preloadViewEnabled) return;
+
+Result: the window size stays frozen at view-creation time (= the orientation at
+login, since preload builds the view at startup).
+
+Fix
+---
+When initView() reuses a preloaded view, re-apply the geometry if the size the
+current screen implies differs from the window's.  Comparing the size (rather
+than always re-applying) preserves the original show animation: on the first
+show after startup nothing changes, so the window keeps the off-screen y from
+calculateInitialGeometry() and slides in as before.  Upstream may prefer
+tracking this with an explicit "geometry invalidated while hidden" flag.
+
+Verified by code inspection against the sources shipped on the device
+(/home/luser/kvk, virtualkeyboardview.cpp md5 43510c5ec4513c112ad225724b09c42f).
+Not compile-tested: the device has no qtbase5-dev/qtdeclarative5-dev, so the
+keyboard cannot be rebuilt there -- build it where the full tree is available.
+
+--- a/src/virtualkeyboard/virtualkeyboardview.cpp
++++ b/src/virtualkeyboard/virtualkeyboardview.cpp
+@@ -147,7 +147,20 @@
+ void VirtualKeyboardView::initView() {
+     const auto preloadViewEnabled =
+         VirtualKeyboardSettings::getInstance().isPreloadViewEnabled();
+     if (view_ != nullptr && preloadViewEnabled) {
++        // sheng: the view is reused, so it also keeps the window size it was
++        // created with.  handleScreensChanged()/updateGeometry() deliberately
++        // do nothing while the keyboard is hidden, so a rotation that happened
++        // while it was hidden leaves the window at the old size and the next
++        // show() would present a stale one.  Re-apply the geometry when the
++        // current screen implies a different size.  Comparing the size (instead
++        // of always re-applying) keeps the original show animation: right after
++        // startup the size is unchanged, so the off-screen y from
++        // calculateInitialGeometry() survives and the keyboard still slides in.
++        const QRect currentGeometry = geometry();
++        if (view_->size() != currentGeometry.size()) {
++            view_->setGeometry(currentGeometry);
++        }
+         return;
+     }
+     KVKBD_INFO("preloadViewEnabled:{}", preloadViewEnabled);

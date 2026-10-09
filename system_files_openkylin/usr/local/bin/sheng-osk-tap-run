@@ -1,0 +1,38 @@
+#!/bin/sh
+# sheng-osk-tap-run — launch the double-tap OSK daemon with logging.
+#
+# The autostart entry runs this instead of sheng-osk-tap.py directly, so the
+# daemon's stderr (every tap / double-tap / skip decision, see its log()) lands
+# in a file we can read afterwards.  Its stderr used to go to /dev/null, which
+# made "why didn't the keyboard pop?" unanswerable -- including the boot-race
+# bug where fcitx5 started without sheng-osk-gate.so (see /usr/local/bin/
+# fcitx5-sheng), so every double-tap was logged as
+# "double-tap(x,y) -> skip (no text field focused)" and nothing appeared.
+#
+# The desktop Exec= line has to stay a single plain path: desktop-entry(5) does
+# not allow unquoted ';', '$', '&', '>' or "%" field codes, and
+# desktop-file-validate rejects them.  Hence this wrapper.
+#
+# Log: /tmp/osk-tap/tap.log   (cleared on reboot; rotated at 1 MiB)
+# Undo: restore /etc/xdg/autostart/sheng-osk-tap.desktop.pre-log.bak
+#       and remove this file.
+#
+# See sheng-openkylin3-rootfs_build.sh -> install_osk_tap().
+
+LOG_DIR=/tmp/osk-tap
+LOG=$LOG_DIR/tap.log
+MAX=1048576
+
+mkdir -p "$LOG_DIR" || exit 1
+
+# Rotate instead of growing without bound.
+if [ -f "$LOG" ]; then
+    size=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
+    if [ "$size" -gt "$MAX" ]; then
+        mv -f "$LOG" "$LOG.1"
+    fi
+fi
+
+printf -- '--- session start %s ---\n' "$(date '+%F %T')" >> "$LOG"
+
+exec /usr/local/bin/sheng-osk-tap.py 2>>"$LOG"

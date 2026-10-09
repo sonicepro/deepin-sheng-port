@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""kylin-software-center「移动应用」列表修复（openKylin 3.0 + KARE/KMRE）。
+
+根因（真机验证，2026-10，sheng 平板 / openKylin 3.0 huanghe）：
+
+  1. 商店的「移动应用」页通过 D-Bus 向扩展插件
+     com.kylin.softwarestore.accessserver 请求目录，即
+     getAndroidApplist(cpu, gpu, systemVersion, androidVersion)。
+     该插件的 introspection XML 声明 4 个 string 参数，但**参数值**必须为
+     ("arm64", "", "", "") 才返回数据；商店实际传的
+     ("arm64","UNKNOWN","3.0","12") 会被 Qt 以
+     "UnknownMethod" 拒绝 → 商店拿不到列表。
+  2. 列表本应写入 ~/.cache/uksc/uksc.db 的 kydroid_app_list 表 +
+     dict.kydroidlist_updatetime；请求失败 → 表恒为 0 行。
+  3. 商店进程读的是**预处理副本** ~/.cache/uksc/uksc_pre.db（预处理会重建该
+     文件并丢弃 kydroid_app_list）→ 即使写了 uksc.db，页面仍停在
+     「获取移动应用列表」。
+  4. 因此商店还会尝试走 Kydroid 老通道（libkydroidrequest.so /
+     /usr/share/kydroid/kydroid.conf），本机不存在 → 该分支永远不完成。
+
+对策：绕开商店/插件的调用缺陷，直接用插件**可用**的参数取目录，写进商店读取的
+两个数据库。只写 kydroid_app_list 表与 dict.kydroidlist_updatetime 键，不碰其它
+数据；两个库都写，页面才能看到。
+"""
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+HOME = os.path.expanduser("~")
+CACHE = os.path.join(HOME, ".cache", "uksc")
+# 商店读 uksc_pre.db；预处理插件从 uksc.db 重建它（并丢掉 kydroid_app_list）。
+DBS = [os.path.join(CACHE, "uksc.db"), os.path.join(CACHE, "uksc_pre.db")]
+
+BUS = "unix:path=/run/user/1000/bus"
+DEST = "com.kylin.softwarestore.accessserver"
+PATH = "/com/kylin/softwarestore/accessserver"
+
+# 实测：只有 (arm64, "", "", "") 返回数据；其它值/参数个数都报 UnknownMethod。
+ARG_SETS = [
+    ["arm64", "", "", ""],
+    ["", "", "", ""],
+]
+
+INTERVAL = int(os.environ.get("KMRE_APPLIST_INTERVAL", "60"))
+LOG = os.environ.get("KMRE_APPLIST_LOG", "/tmp/kmre-applist-bridge.log")
+
+
+def log(msg):
+    line = "%s %s" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg)
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass
+    print(line, flush=True)
+
+
+def fetch_catalogue():
+    """向扩展插件取目录，返回解析后的 JSON（dict）或 None。"""
+    for args in ARG_SETS:
+        argv = ["gdbus", "call", "--address", BUS, "--dest", DEST,
+                "--object-path", PATH,
+                "--method", DEST + ".getAndroidApplist"] + args
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=90)
+        except Exception as exc:
+            log("gdbus 调用异常: %r" % (exc,))
+            continue
+        out = (proc.stdout or "").strip()
+        if not out:
+            continue
+        match = re.match(r"^\('(.*)',\)$", out, re.S)
+        if not match:
+            # 参数不匹配时 Qt 报 UnknownMethod，这是已知现象，静默换下一组参数
+            continue
+        payload = (match.group(1).replace("\\n", "\n")
+                   .replace('\\"', '"').replace("\\'", "'"))
+        try:
+            data = json.loads(payload)
+        except Exception as exc:
+            log("JSON 解析失败: %r" % (exc,))
+            continue
+        if str(data.get("code")) == "200":
+            return data
+        log("服务端返回 code=%s message=%s" % (data.get("code"), data.get("message")))
+    return None
+
+
+def has_table(con, name):
+    try:
+        row = con.execute(
+            "select 1 from sqlite_master where type='table' and name=?", (name,)
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def write_db(path, rows, stamp):
+    """把目录写入单个数据库；表还没建好（商店未首启）就跳过。"""
+    if not os.path.exists(path):
+        return "missing"
+    con = sqlite3.connect(path, timeout=30)
+    try:
+        if not has_table(con, "kydroid_app_list") or not has_table(con, "dict"):
+            return "no-table"
+        cur = con.cursor()
+        cur.execute("delete from kydroid_app_list")
+        cur.executemany(
+            "insert into kydroid_app_list values(?,?,?,?,?,?,?)", rows)
+        cur.execute("update dict set value=? where key='kydroidlist_updatetime'",
+                    (stamp,))
+        con.commit()
+        return "ok"
+    finally:
+        con.close()
+
+
+def sync_once():
+    data = fetch_catalogue()
+    if not data:
+        return 0
+    apps = data.get("data")
+    if not isinstance(apps, list):
+        return 0
+    rows = [(
+        str(a.get("appId", "") or ""),
+        str(a.get("packageName", "") or ""),
+        str(a.get("name", "") or ""),
+        str(a.get("version", "") or ""),
+        str(a.get("size", "") or ""),
+        str(a.get("file", "") or ""),
+        str(a.get("updateTime", "") or ""),
+    ) for a in apps]
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    results = {}
+    for db in DBS:
+        try:
+            results[os.path.basename(db)] = write_db(db, rows, stamp)
+        except Exception as exc:
+            results[os.path.basename(db)] = "error:%r" % (exc,)
+    log("同步 %d 个移动应用 -> %s" % (len(rows), results))
+    return len(rows)
+
+
+def main():
+    once = "--once" in sys.argv
+    log("启动（库=%s，间隔=%ss）" % (",".join(os.path.basename(d) for d in DBS), INTERVAL))
+    while True:
+        try:
+            if sync_once() == 0:
+                log("本轮未取到列表（插件可能尚未就绪）")
+        except Exception as exc:
+            log("同步异常: %r" % (exc,))
+        if once:
+            break
+        time.sleep(INTERVAL)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=sheng OSK tap
+Name[zh_CN]=双击输入框弹出屏幕键盘
+Comment=Open the on-screen keyboard on a double-tap of a text field
+Exec=/usr/local/bin/sheng-osk-tap-run
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,16 @@
+[Unit]
+Description=KMRE 容器 32 位 ABI 使能（ro.product.cpu.abilist32=armeabi-v7a,armeabi）
+Documentation=file:/usr/local/sbin/kmre-abi32.sh
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/kmre-abi32.sh
+# 容器/属性服务可能还没就绪，失败后重试即可（脚本本身也带等待与幂等判断）。
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,48 @@
+# sheng: screen-keyboard system defaults (compiled by `glib-compile-schemas`).
+#
+# preload-view-enabled=true
+#   kylin-virtual-keyboard builds its QML view lazily: with this false (the
+#   upstream default) virtualkeyboardview.cpp initView() constructs a fresh
+#   QQuickView, reloads the QML tree and the theme, and recompiles shaders on
+#   EVERY pop, and destroyView() deletes it on hide:
+#       if (view_ != nullptr && preloadViewEnabled) return;      // initView
+#       if (!isPreloadViewEnabled()) view_.release()->deleteLater();  // destroyView
+#   Measured on the sheng tablet: show->visible 0.43/0.53/0.51 s with false vs
+#   0.34/0.36/0.32/0.31 s with true (~38% faster, and the "view rebuilt" log
+#   lines disappear entirely).  The remaining ~300 ms is kylin-wlcom mapping a
+#   ~3048x1220 surface on DSI-1 at scale 2.5 and is not affected by this key.
+#
+#   KNOWN UPSTREAM DEFECT, WORKED AROUND AT RUNTIME BY sheng-osk-rotate:
+#   once the view is reused, its window size freezes at view-creation time.
+#   handleScreensChanged() (virtualkeyboardmanager.cpp:274) and
+#   updateGeometry() (virtualkeyboardview.cpp:102) both bail out while the
+#   keyboard is hidden, and initView() returns early at :150 without ever
+#   re-applying the geometry from :196.  So with this key on:
+#       * rotate while the keyboard is OPEN   -> it adapts (updateGeometry runs)
+#       * hide the keyboard, rotate, reopen   -> it would keep the old width
+#   The sheng-osk-rotate daemon (installed by install_osk_tap unless
+#   OSK_ROTATE_ENV=0) polls com.kylin.statusmanager.interface.get_current_rotation
+#   and, ONLY when the orientation changed while the keyboard was hidden,
+#   restarts the keyboard process so the view is rebuilt at the current
+#   orientation.  A visible keyboard is never touched.  That is what lets
+#   "boots and pops fast" and "hide, rotate, reopen follows the screen" hold at
+#   the same time without recompiling the keyboard.
+#
+#   The upstream-grade one-line fix (re-apply the geometry when initView()
+#   reuses the view) is kept as
+#   docs/patches/kylin-virtual-keyboard-preload-rotation.patch -- once the
+#   shipped keyboard carries it, build with OSK_ROTATE_ENV=0 and keep
+#   OSK_PRELOAD_ENV=1.
+#
+# The other two keys used by the double-tap feature are runtime state, NOT
+# defaults: the gate writes/clears $XDG_RUNTIME_DIR/sheng-osk-textactive, and the
+# tap daemon only reads it.  animation-enabled is deliberately left at its
+# upstream default (true) -- disabling it was measured to change nothing
+# (0.31-0.36 s either way), so it is purely cosmetic.
+#
+# NOTE: install_osk_tap() rewrites the preload-view-enabled line below from
+# OSK_PRELOAD_ENV (default: follow OSK_ROTATE_ENV, i.e. true when the rotate
+# daemon is installed); this file is the source it installs.
+
+[org.ukui.virtualkeyboard]
+preload-view-enabled=true

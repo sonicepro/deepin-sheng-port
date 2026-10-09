@@ -1,0 +1,43 @@
+#!/bin/bash
+# sheng-lock-on-login — lock the UKUI session right after (auto)login.
+#
+# Pairs with lightdm autologin: the desktop session preloads during boot (so
+# there is no wait for it after the password), while the user still has to type
+# a password -- at the LOCK SCREEN instead of the greeter.
+#
+# lightdm 1.32.0-ok11 ships autologin-user-lock / enable-autologin-user-lock but
+# neither takes effect (verified on device: boot auto-logs-in and stays
+# unlocked), so we lock from an XDG autostart entry instead.  That entry runs in
+# the UKUI "Initialization" phase (same as ukui-screensaver itself) so the lock
+# covers the desktop instead of appearing after it.  We wait until
+# ukui-screensaver-backend owns org.ukui.ScreenSaver on the session bus, then run
+# `ukui-screensaver-command --lock` (the same command sheng-screen-toggle already
+# uses for the power-key lock).
+set -u
+
+wait_and_lock() {
+    for _ in $(seq 1 120); do
+        if dbus-send --session --print-reply --dest=org.freedesktop.DBus \
+                /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
+                string:org.ukui.ScreenSaver 2>/dev/null | grep -q 'boolean true'; then
+            break
+        fi
+        sleep 0.5
+    done
+    exec /usr/bin/ukui-screensaver-command --lock
+}
+
+if [ "${1:-}" = "--worker" ]; then
+    wait_and_lock
+    exit 0
+fi
+
+# Detach into its own session so ukui-session's process-group teardown cannot
+# kill us while we wait for ukui-screensaver (which starts in the SAME phase),
+# and so we never block the autostart phase sequence.
+if command -v setsid >/dev/null 2>&1; then
+    setsid "$0" --worker </dev/null >/dev/null 2>&1 &
+else
+    wait_and_lock </dev/null >/dev/null 2>&1 &
+fi
+exit 0

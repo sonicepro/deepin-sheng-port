@@ -9,6 +9,7 @@
 # The accelerometer device node /dev/fastrpc-adsp is made accessible to the
 # `luser` group by /etc/udev/rules.d/70-sheng-fastrpc.rules.
 # ------------------------------------------------------------------
+import glob
 import math
 import os
 import re
@@ -20,13 +21,48 @@ IFACE = "com.kylin.statusmanager.interface"
 OBJ = "/"
 POLL = re.compile(r"X=(-?\d+(?:\.\d+)?)\s+Y=(-?\d+(?:\.\d+)?)\s+Z=(-?\d+(?:\.\d+)?)")
 
-# While the panel is blanked we must NOT rotate: a rotation reconfigures the
-# output and kylin-wlcom un-blanks the panel on it, so the screen would light
-# back up on its own.  sheng-screen-toggle (the power-key "关闭显示器" action)
-# creates/removes this per-user marker.
+# While the panel is blanked we must NOT rotate: `set_rotation` reconfigures the
+# output and kylin-wlcom treats it as activity and un-blanks the panel, so the
+# screen would light back up on its own the moment the tablet is turned.
+#
+# sheng-screen-toggle (the power-key "关闭显示器" action) writes this per-user
+# marker ONLY when "唤醒屏幕时需要密码" (org.ukui.screensaver
+# close-activation-enabled) is OFF.  When it is ON, blanking instead locks the
+# session (ukui-screensaver-command --lock) and never writes the marker -- so the
+# marker alone is NOT enough.  We also read the real DPMS/backlight state, which
+# the compositor sets on every blank path (power key AND idle) and clears when
+# the panel comes back.  Either signal suppresses rotation.
 SCREEN_OFF = os.path.join(
     os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()),
     "sheng-panel-off")
+
+
+def _read(path):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def panel_is_off():
+    """True if the internal panel is blanked (DPMS Off / backlight off).
+
+    Two independent indicators, because either can lag behind:
+      * /sys/class/drm/*-DSI-1/dpms          -> "Off"
+      * /sys/class/backlight/*/bl_power      -> non-zero (FB_BLANK_*)
+    `kscreen-doctor -d off` (and the compositor's idle blank) set both; issuing a
+    set_rotation while they read "off" is exactly what re-lights the panel.
+    """
+    for node in ["/sys/class/drm/card0/card0-DSI-1/dpms"] + \
+            sorted(glob.glob("/sys/class/drm/card*-DSI-1/dpms")):
+        if (_read(node) or "").lower() == "off":
+            return True
+    for node in sorted(glob.glob("/sys/class/backlight/*/bl_power")):
+        val = _read(node)
+        if val is not None and val.isdigit() and int(val) != 0:
+            return True
+    return False
 
 # ----- calibration ---------------------------------------------------
 # The accelerometer reports specific force in m/s^2 with the sensor's own
@@ -112,8 +148,9 @@ def main():
                     pending = None
                     continue
                 # Panel blanked -> a rotation would un-blank it; skip (and let the
-                # next sample after it comes back rotate if needed).
-                if os.path.exists(SCREEN_OFF):
+                # next sample after it comes back rotate if needed).  Honour both
+                # the state marker and the real DPMS state (see panel_is_off).
+                if os.path.exists(SCREEN_OFF) or panel_is_off():
                     pending = None
                     continue
                 now = time.time()

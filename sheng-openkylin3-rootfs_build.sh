@@ -63,6 +63,46 @@
 #                       control center "Display" screen-zoom dropdown; the panel
 #                       is 3048px wide, below the hardcoded 3072/3840 gates, so
 #                       the list otherwise stops at 225%); default: on
+#       PEONY_IDM_FIX_ENV (optional — mask the peony "Intelligent Space" IDM
+#                       service (com.peony.idm.service) so the FIRST file-manager
+#                       open doesn't freeze ~10s ("peony not responding") waiting
+#                       on it. The service only stalls like that when the kylin-ai
+#                       backend is absent, so the default FOLLOWS REMOVE_AI: on
+#                       when AI is stripped (REMOVE_AI=1), off when AI is kept
+#                       (智能空间 then works). Set =1/=0 to override.
+#       GESTURE_SCROLL_FIX_ENV=0 (optional — skip the ukui touch-gesture fix.
+#                       ukui's libqt5-gesture-extensions grabs each scroll-area
+#                       viewport with QScroller::TouchGesture, which makes Qt stop
+#                       synthesizing mouse from touch, so peony (opens on mouse
+#                       double-click) can't open folders by finger in a scrollable
+#                       view. The fix switches it to LeftMouseButtonGesture (touch
+#                       is synthesized to mouse again -> double-click works, and the
+#                       scroller now drives mouse-drag flick -> one-finger scroll
+#                       kept); default: on
+#       OSK_TAP_ENV=0 (optional — skip the on-screen-keyboard change: stop
+#                       kylin-virtual-keyboard from popping when an app focuses a
+#                       text field (an LD_PRELOAD gate on fcitx5), and instead open
+#                       it on a DOUBLE-tap of the screen — but only while a text
+#                       field is focused, so a double-tap on (say) a file-manager
+#                       folder does nothing.  See install_osk_tap for the fcitx5
+#                       start-order trap that made this non-deterministic across
+#                       reboots); default: on
+#       FP_UNLOCK_WAKE_ENV=0 (optional — skip the fingerprint "unlock lights the
+#                       panel" daemon: while the panel is DPMS-off and the lock
+#                       screen holds the fingerprint armed, a successful match
+#                       unlocks the session but the panel stays dark (a finger
+#                       touch is not an input event, so kylin-wlcom does not
+#                       unblank). The daemon watches org.ukui.ScreenSaver's
+#                       `unlock` signal (plus a GetLockState poll) and runs
+#                       kscreen-doctor -d on; mismatches leave the screen dark);
+#                       default: on
+#       AUTOLOGIN_ENV=0 (optional — DISABLE lightdm auto-login: boot stops at
+#                       the ukui-greeter and asks for the password, but the
+#                       desktop session then loads only AFTER it (a visible wait).
+#                       ON by default: lightdm auto-logs-in the desktop user AND
+#                       sheng-lock-on-login immediately locks the session, so the
+#                       desktop preloads during boot BEHIND the lock screen and the
+#                       user still types a password (fast login)); default: on
 #
 # Output (one per boot mode):
 #   openkylin_<ver>_<mode>_<ts>.img.gz   (Android-sparse ext4 rootfs, gzip)
@@ -252,7 +292,18 @@ fetch_rootfs() {
     esac
 }
 
-# --- openKylin / lightdm autologin (UKUI uses lightdm + ukui-greeter) --------
+# --- openKylin / lightdm autologin + lock-on-login (UKUI uses lightdm) -------
+# ON by default (AUTOLOGIN_ENV=1): lightdm auto-logs-in the desktop user, and
+# sheng-lock-on-login locks the session the moment it comes up -- so the desktop
+# preloads during boot BEHIND the lock screen (no wait after the password) while
+# the user still types a password (at the lock screen, not the greeter).  Set
+# AUTOLOGIN_ENV=0 for a plain ukui-greeter (asks for the password at boot, but
+# the session then loads only after it -> a visible wait).
+# This is the BOOT login only -- independent of the in-session "what the power
+# key / blank does" and "唤醒屏幕时需要密码" behaviour, which is
+# org.ukui.screensaver close-activation-enabled (see sheng-screen-toggle).
+AUTOLOGIN_ENV="${AUTOLOGIN_ENV:-1}"
+
 setup_lightdm_autologin() {
     local rootdir="$1" user="$2"
     mkdir -p "$rootdir/etc/lightdm/lightdm.conf.d"
@@ -261,6 +312,21 @@ setup_lightdm_autologin() {
 autologin-user=${user}
 autologin-user-timeout=0
 EOF
+}
+
+# Lock the session right after (auto)login so the desktop can preload behind the
+# lock screen.  lightdm 1.32.0-ok11's own autologin-user-lock /
+# enable-autologin-user-lock keys have NO effect (verified on device), so we lock
+# ourselves via an XDG autostart entry in the UKUI "Initialization" phase (same
+# phase as ukui-screensaver, so the lock covers the desktop rather than appearing
+# after it).  Only installed alongside autologin.
+install_lock_on_login() {
+    local rootdir="$1"
+    echo "==> 配置开机自动登录后立即锁屏 (sheng-lock-on-login)..."
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/bin/sheng-lock-on-login" \
+        "$rootdir/usr/local/bin/sheng-lock-on-login"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/xdg/autostart/sheng-lock-on-login.desktop" \
+        "$rootdir/etc/xdg/autostart/sheng-lock-on-login.desktop"
 }
 
 # --- 如意玲珑 (Linyaps) 运行环境 --------------------------------------------
@@ -361,6 +427,13 @@ install_linglong_env() {
 #   4) kylin-installer 用旧语法 `aapt badging` → wrapper 转 `aapt dump badging`。
 #   5) 容器镜像自身的 32 位 boringssl/dex2oat/binder/vold/ethernet 补丁由
 #      patch_kmre_image()（下方）覆盖到镜像 tar；本函数负责宿主侧安装。
+#   6) 容器镜像虽然声明了 32 位（odm 的 abilist32 / ro.zygote=zygote64_32），但起来
+#      后 product 级 ro.product.cpu.abilist32 是空值 → 纯 64 位，32 位包装不上。
+#      用 kmre-abi32（用户级服务）通过 manager 的 D-Bus setSystemProp 设回去。
+#   7) 软件商店「移动应用」页一直转圈：商店调扩展插件 getAndroidApplist 的参数值
+#      不被接受（只有 ("arm64","","","") 可用）→ kydroid_app_list 恒 0 行；而商店
+#      进程读的是预处理副本 uksc_pre.db（重建时丢掉该表）。用 kmre-applist-bridge
+#      （用户级服务）直接取目录并同时写两个库。
 KMRE_ENV="${KMRE_ENV:-1}"                   # 0 = 跳过整节
 KMRE_STUB_VER="${KMRE_STUB_VER:-3.0-250506.10+250506.11}"
 KMRE_IMAGE_OVERLAY="${KMRE_IMAGE_OVERLAY:-$SCRIPT_DIR/kmre_image_files.tar}"
@@ -461,9 +534,43 @@ EOF
     chroot "$rootdir" systemctl enable \
         docker.socket docker.service containerd \
         kylin-kmre-daemon.service kmre-binder.service kmre-fixups.service \
-        kmre-zram.service dnsmasq \
+        kmre-zram.service dnsmasq kmre-abi32.service \
         2>/dev/null || true
     rm -f "$rootdir/usr/sbin/policy-rc.d"
+
+    # 7) 让容器支持 32 位（armeabi-v7a）应用。上游镜像是双 ABI（odm 里
+    #    ro.odm.product.cpu.abilist32=armeabi-v7a,armeabi、ro.zygote=zygote64_32），
+    #    但容器起来后 product 级 ro.product.cpu.abilist32 是**空值**，把 32 位屏蔽掉
+    #    → 商店/容器按纯 64 位对待，目录里少数 32 位包装不上。用 kmre manager 的
+    #    D-Bus setSystemProp 设回去（该接口不接受空字符串，故只能开不能关；重复设置
+    #    幂等）。运行期执行，故用用户级服务（刷机后随桌面会话起来）。
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/sbin/kmre-abi32.sh" \
+        "$rootdir/usr/local/sbin/kmre-abi32.sh"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/systemd/user/kmre-abi32.service" \
+        "$rootdir/etc/systemd/user/kmre-abi32.service"
+
+    # 8) 软件商店「移动应用」列表修复。商店请求扩展插件的 getAndroidApplist 时，
+    #    插件只在参数为 ("arm64","","","") 时返回数据；商店传的
+    #    ("arm64","UNKNOWN","3.0","12") 被 Qt 以 UnknownMethod 拒掉 → 目录写不进
+    #    kydroid_app_list（恒 0 行）→ 页面永远停在「获取移动应用列表」。且商店进程
+    #    读的是预处理副本 ~/.cache/uksc/uksc_pre.db（预处理重建时会丢掉该表）。
+    #    故用用户级服务直接取目录并写入两个库（只写该表与 dict 的更新时间键）。
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/bin/kmre-applist-bridge" \
+        "$rootdir/usr/local/bin/kmre-applist-bridge"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/systemd/user/kmre-applist-bridge.service" \
+        "$rootdir/etc/systemd/user/kmre-applist-bridge.service"
+
+    # 用户级服务的 enable 软链（构建期没有用户 session，systemctl --user enable
+    # 不可用；与 install_autorotate 等保持同一做法）。
+    local _udir="$rootdir/home/${USER_NAME}/.config/systemd/user" _t _u
+    mkdir -p "$_udir"
+    for _u in kmre-abi32.service kmre-applist-bridge.service; do
+        for _t in default.target graphical-session.target; do
+            mkdir -p "$_udir/${_t}.wants"
+            ln -sf "/etc/systemd/user/${_u}" "$_udir/${_t}.wants/${_u}"
+        done
+    done
+    chown -R "${USER_NAME}:${USER_NAME}" "$rootdir/home/${USER_NAME}/.config" 2>/dev/null || true
 
     # 6) 给容器镜像 tar 打补丁（32 位/binder/ethernet 修复），否则新刷机重启循环。
     patch_kmre_image "$rootdir"
@@ -552,6 +659,11 @@ install_autorotate() {
 #      adjustBrightnessWithLux 通过内部 BrightThread 施加亮度，在本机
 #      Wayland/kylin-wlcom 上无效（真机实测：开灯/关灯、连它自带的 debug-lux 扫值
 #      亮度都不变）。故改用本仓库自带的 sheng-autobrightness 守护进程。
+#   5) 用户偏置：曲线是固定映射，会把用户手调的亮度覆盖掉（「自动亮度又变暗」）。
+#      守护进程轮询 getPrimaryBrightness，把不是自己写出的变化记为偏置
+#      bias = manual - curve(lux)，此后 applied = clamp(curve(lux)+bias,1,100)。
+#      偏置持久化在用户目录 ~/.config/sheng/autobrightness.conf，是**运行时状态**，
+#      构建不需要任何额外步骤；回归测试见 tools/test-sheng-autobrightness-bias.py。
 #   AUTOBRIGHTNESS_ENV=0 可跳过。
 AUTOBRIGHTNESS_ENV="${AUTOBRIGHTNESS_ENV:-1}"
 
@@ -586,9 +698,13 @@ install_autobrightness() {
 #   gammaforbrightness 键）→ 只写 gsettings org.ukui.power-manager brightness-ac，
 #   指望 upm 走硬件背光；而本机 upm 驱动不了 ktz8866（RegulateBrightness 返回
 #   "no effective node"）→ 拖动无效。侧栏/快捷中心直接走 setPrimaryBrightness
-#   （gamma）所以正常。做法：用户级守护「双向」桥接——brightness-ac 变化 → 转发到
-#   org.ukui.SettingsDaemon /GlobalBrightness setPrimaryBrightness(u)（滑块能真正改亮度）；
-#   当前亮度 → 回写 brightness-ac（滑块位置反映真实亮度）。
+#   （gamma）所以正常。做法：用户级守护桥接——brightness-ac 变化 → 转发到
+#   org.ukui.SettingsDaemon /GlobalBrightness setPrimaryBrightness(u)（滑块能真正改亮度）。
+#   注意：**反向**（当前亮度 → 回写 brightness-ac）自 2026-10 起默认关闭
+#   （SHENG_BRIDGE_MIRROR=1 才开）。原因（真机 dbus-monitor + dconf 负载解码实证）：
+#   brightness-ac 是 ukui-settings-daemon 的**输入键**，回写它会给 usd 的转屏故障
+#   "上膛"——之后一次输出重配置就把亮度放大到很亮/100%（观测 51→78、59→92→100）。
+#   详见 DEVELOPMENT.md「转屏时亮度被顶到 100%」。
 #   BRIGHTNESS_BRIDGE_ENV=0 可跳过。
 BRIGHTNESS_BRIDGE_ENV="${BRIGHTNESS_BRIDGE_ENV:-1}"
 
@@ -651,6 +767,55 @@ install_panel_brightness() {
     chown -R "${uname}:${uname}" "$rootdir/home/${uname}/.config" 2>/dev/null || true
 
     echo "   面板背光引擎配置完成"
+}
+
+# --- peony 首次打开卡 10s + "无响应"（停用 IDM/AI 服务）-------------------------
+# 症状：开机后**首次**点桌面「计算机」打开文件管理(peony) 卡 ~10s，随后合成器弹
+#   「peony程序无响应（进程号XXX）是否强制关闭应用」。冷启动 10.6s、二次起 0.4s。
+# 根因：peony 首启会 D-Bus 激活 com.peony.idm.service → 用户 unit
+#   peony-intelligent-data-management-service.service（"智能空间/AI 分组"）；该服务连
+#   本机**不存在**的 Kylin AI socket /tmp/.kylin-ai-business-unix/1000/
+#   KnowledgeBaseService.sock，每秒重试、**10s 后放弃**（kb_session_init 失败）；peony
+#   同步等该服务就绪 → 主线程冻结 10s → wlcom 在 ~10s 处记 "peony view is not
+#   responding"。真机实测：pkill 掉该服务后重启 peony 又卡 10s，服务在跑则 0.2s。
+# 该服务只在 kylin-ai 后端缺失时才会每秒重试 10s（连不上 /tmp/.kylin-ai-business-unix/…
+#   KnowledgeBaseService.sock）；后端在时智能空间正常。故**只在 AI 被剥离时**掩码该用户
+# 服务：D-Bus 激活立即失败 → peony 不再等待（真机首开 10.4s→0.2s）；保留 AI 时不掩码，
+# 智能空间可正常用。默认跟随 REMOVE_AI（可显式设 PEONY_IDM_FIX_ENV 覆盖）。
+# 须在 setup_users 之后（写 ~/.config/systemd/user 掩码软链）。
+if is_true "$REMOVE_AI"; then
+    PEONY_IDM_FIX_ENV="${PEONY_IDM_FIX_ENV:-1}"   # AI 已剥离 → 掩码，防止首开白卡 10s
+else
+    PEONY_IDM_FIX_ENV="${PEONY_IDM_FIX_ENV:-0}"   # 保留 AI → 不掩码，智能空间正常用
+fi
+
+install_peony_idm_fix() {
+    local rootdir="$1" uname="$2"
+    echo "==> 停用 peony「智能空间」IDM 服务（修首次打开文件管理卡 10s + 无响应）..."
+
+    # 掩码：软链指向 /dev/null（等价 `systemctl --user mask`）。构建期没有用户 session，
+    #   systemctl --user 用不了，直接建软链即可（systemd 开机读同一路径）。
+    local udir="$rootdir/home/${uname}/.config/systemd/user"
+    mkdir -p "$udir"
+    ln -sf /dev/null "$udir/peony-intelligent-data-management-service.service"
+    chown -R "${uname}:${uname}" "$rootdir/home/${uname}/.config" 2>/dev/null || true
+
+    echo "   peony IDM 服务已掩码 (~/.config/systemd/user/…->/dev/null)"
+}
+
+# --- ukui 触摸手势：让可滚动目录里"手指点按能打开文件夹"且保留一指滚动 -----------
+# UKUI 手势插件 libqt5-gesture-extensions 对滚动区 viewport 调
+#   QScroller::grabGesture(viewport, TouchGesture) → 给 viewport 设 WA_AcceptTouchEvents
+#   → Qt 不再把触摸合成鼠标 → peony(靠鼠标双击打开)在可滚动目录里手指点不开（放得下
+#   不滚动的目录仍正常；鼠标不受影响）。修法：把手势类型改成 LeftMouseButtonGesture
+#   （触摸仍合成鼠标→双击成立；QScroller 改抓鼠标拖拽→一指滚动保留）。就地打 .so 字节补丁。
+# 见 tools/sheng-gesture-scroll-fix.sh。GESTURE_SCROLL_FIX_ENV=0 可跳过。
+GESTURE_SCROLL_FIX_ENV="${GESTURE_SCROLL_FIX_ENV:-1}"
+
+install_gesture_scroll_fix() {
+    local rootdir="$1"
+    echo "==> 修补 ukui 触摸手势（修可滚动目录里手指点不开文件夹 + 保留一指滚动）..."
+    bash "$SCRIPT_DIR/tools/sheng-gesture-scroll-fix.sh" "$rootdir"
 }
 
 # --- 「设置→显示器→缩放屏幕」加 250% / 275% 档 --------------------------------
@@ -742,6 +907,78 @@ install_logind_inhibit() {
     echo "   logind 挂起等待已设为 1s（开机生效）"
 }
 
+# --- 屏幕键盘：只在「双击输入框」时弹（停用一聚焦就自动弹）+ 弹出提速 ----------
+# 目标：openKylin 的屏幕键盘（kylin-virtual-keyboard，由 fcitx5 驱动）本来会「一聚焦
+#   输入框就自动弹」——界面打开自动聚焦、微信切好友时都会弹。改成：**只有双击、且
+#   当前有输入框聚焦时**才弹 —— 点好友/按钮、滚动、双击文件夹都不弹。
+# 做法：
+#   ① fcitx5 侧：LD_PRELOAD 垫片 sheng-osk-gate.so（源码 tools/sheng-osk-gate.c，
+#      **预编译 arm64**）。它拦掉自动弹出 `UserInterfaceManager::showVirtualKeyboard()`，
+#      并用 show/hide 请求维护「当前是否有输入框聚焦」标记：文本框获得焦点→show→
+#      $XDG_RUNTIME_DIR/sheng-osk-textactive=1；失去焦点→hide→0。
+#   ② 守护 sheng-osk-tap.py：只读触摸屏（MT-B，不抢事件）识别**双击**；双击时若标记=1
+#      且键盘没显示 → 调 fcitx5 后端 `ShowVirtualKeyboard` 弹出。
+#   ③ 自启：由包装脚本 fcitx5-sheng 拉起 fcitx5（带 LD_PRELOAD）；新增
+#      sheng-osk-tap.desktop 经包装脚本 sheng-osk-tap-run 拉起守护。
+#
+# 本步骤**只做「双击输入框弹出键盘」这一件事**。曾试验并已全部撤销（原因见
+# DEVELOPMENT.md「屏幕键盘弹出偏慢 / 转屏后屏幕键盘尺寸不自适应」）：
+#   - gsettings preload-view-enabled=true（展开快约 38%，但窗口尺寸冻结）
+#   - sheng-osk-rotate 转屏守护（转屏时重启键盘以重建几何）
+#   - docs/patches/kylin-virtual-keyboard-preload-rotation.patch（上游一行补丁）
+#
+# ⚠️ 启动顺序陷阱（真机踩过，两处入口必须都带垫片，否则垫片会「有时在、有时不在」）：
+#   fcitx5 有两条启动路径，而 `org.fcitx.Fcitx5` 这个总线名只能被一方抢到，输的一方
+#   直接退出（日志里表现为 `Unable to request dbus name. Is there another fcitx
+#   already running?`）：
+#     1) /etc/xdg/autostart/fcitx5.desktop → systemd app-fcitx5@autostart.service
+#     2) /usr/share/dbus-1/services/org.fcitx.Fcitx5.service → D-Bus 按需激活
+#        （登录时 kylin-virtual-keyboard 会先来要这个名字，所以**常常是这条赢**）
+#   原先只有 (1) 带 LD_PRELOAD，于是 (2) 赢的那些开机里 fcitx5 是**裸启动**的：
+#   垫片没进 → 没人写 sheng-osk-textactive → 守护每次双击都正确识别后又
+#   「skip (no text field focused)」→ 键盘根本弹不出来。因为取决于谁先跑，
+#   表现为**偶发**；又因为守护 stderr 原先丢进 /dev/null，现象完全不可观测。
+#   修法：两条入口都 exec 同一个包装脚本 fcitx5-sheng（内含 LD_PRELOAD），
+#   并把守护 stderr 落到 /tmp/osk-tap/tap.log（sheng-osk-tap-run）。
+#   OSK_TAP_ENV=0 可跳过（默认开）。
+install_osk_tap() {
+    local rootdir="$1"
+    echo "==> 屏幕键盘：停用自动弹出，改成「双击输入框」弹出 + 预加载提速..."
+
+    # ① 垫片与双击守护
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/usr/local/lib/sheng-osk-gate.so" \
+        "$rootdir/usr/local/lib/sheng-osk-gate.so"
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/bin/sheng-osk-tap.py" \
+        "$rootdir/usr/local/bin/sheng-osk-tap.py"
+
+    # ② fcitx5 两条启动入口共用的包装脚本（内含 LD_PRELOAD，缺一不可）
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/bin/fcitx5-sheng" \
+        "$rootdir/usr/local/bin/fcitx5-sheng"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/usr/share/dbus-1/services/org.fcitx.Fcitx5.service" \
+        "$rootdir/usr/share/dbus-1/services/org.fcitx.Fcitx5.service"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/xdg/autostart/fcitx5.desktop" \
+        "$rootdir/etc/xdg/autostart/fcitx5.desktop"
+
+    # ③ 双击守护包装脚本（把 stderr 落到日志，否则双击为何不弹不可观测）
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/bin/sheng-osk-tap-run" \
+        "$rootdir/usr/local/bin/sheng-osk-tap-run"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/xdg/autostart/sheng-osk-tap.desktop" \
+        "$rootdir/etc/xdg/autostart/sheng-osk-tap.desktop"
+
+    # 至此只保留「双击输入框弹出键盘」这一项功能。
+    #
+    # 曾经还装过（已按决定移除，理由见 DEVELOPMENT.md 对应条目）：
+    #   - 键盘视图预加载 preload-view-enabled=true（展开快约 38%，但窗口尺寸会冻结）
+    #   - 转屏守护 sheng-osk-rotate（转屏时重启键盘以重建几何）
+    # 两者互相依存且引入的问题多于收益；用户要求回到"只有双击唤醒键盘"的原始状态。
+    # 相关文件（system_files_openkylin/usr/local/bin/sheng-osk-rotate、
+    # etc/systemd/user/sheng-osk-rotate.service、usr/share/glib-2.0/schemas/
+    # 99-sheng-osk.gschema.override、docs/patches/kylin-virtual-keyboard-
+    # preload-rotation.patch）已不再被本函数安装，应从仓库删除。
+
+    echo "   已装：sheng-osk-gate.so(LD_PRELOAD) + fcitx5-sheng(两条入口) + 双击守护及日志包装 + 两个自启项"
+}
+
 # --- Extract once up front (so we can size the image to fit) -----------------
 echo "==> Extracting openKylin userland..."
 STAGE="$(mktemp -d)"
@@ -786,9 +1023,16 @@ echo "==> Target image size: ${IMAGE_SIZE}"
 #      `biometric-driver-community-multidevice` 的 goodixmoc.so 复制成 fpc1553.so 并把
 #      .so 里烤死的驱动名 goodixmoc(@0x8430) 改成 fpc1553，再让驱动用兄弟目录里的私有
 #      libfprint（含 fpc1553 驱动）——即服务 drop-in 的 FP_FPC1553=1 + LD_LIBRARY_PATH。
-#   3) 两个自研补丁（预编译二进制在 fingerprint_payload/）：
-#      - libfprint-2.so.2.0.0：改 fpc1553 驱动 wait_for_finger_lift，验证/识别匹配到即
-#        上报（不再等抬手）但保留芯片 deep-sleep → **按住即解锁**。
+#   3) 自研补丁（预编译二进制在 fingerprint_payload/）：
+#      - libfprint-2.so.2.0.0（同一颗 so 上两处改动）：
+#        a. 改 fpc1553 驱动 wait_for_finger_lift，验证/识别匹配到即上报（不再等抬手）
+#           但保留芯片 deep-sleep → **按住即解锁**。
+#        b. 关掉 libfprint 的**温度模型**（等价源码 `dev_class->temp_hot_seconds = -1`；
+#           上游所有 match-on-chip 驱动都显式关它，本移植漏了 → 落回默认 180 秒）。
+#           不关的后果：息屏期间锁屏对话框每 30 秒重挂识别 → 180 秒判 HOT → 框架报
+#           “Device disabled to prevent overheating.” → 此后每次识别**瞬时失败**，
+#           被锁屏对话框当连续失败并立即重试 → 几秒烧完 MaxFailedTimes=5，
+#           亮屏即见「指纹失败，5 次机会全用完」。补丁脚本 tools/sheng-fp-thermal-off.sh（仅改 2 字节）。
 #      - fpc1553.ko.zst：去掉内核模块里无条件的 irq_set_irq_wake（指纹 IRQ 不再是唤醒
 #        源）→ **点休眠不再 1.8s 自唤醒**。（vermagic 须匹配注入的内核！）
 # ⚠ 升级内核要重编 fpc1553.ko；升级 xiaomi-sheng-fingerprint 包会覆盖私有 libfprint。
@@ -847,11 +1091,11 @@ PYEOF
         return 0
     fi
 
-    # (4) 私有 libfprint（按住即解锁版）——覆盖 deb 里的同名文件。
+    # (4) 私有 libfprint（按住即解锁 + 关闭温度模型）——覆盖 deb 里的同名文件。
     if [ -f "$SCRIPT_DIR/fingerprint_payload/libfprint-2.so.2.0.0" ]; then
         install -Dm755 "$SCRIPT_DIR/fingerprint_payload/libfprint-2.so.2.0.0" \
             "$rootdir/usr/lib/xiaomi-sheng-fingerprint/libfprint-2.so.2.0.0"
-        echo "   私有 libfprint 覆盖为『按住即解锁』版"
+        echo "   私有 libfprint 覆盖为『按住即解锁 + 关温度模型』版"
     fi
 
     # (5) 休眠修复：覆盖内核模块 fpc1553.ko（去掉 IRQ 唤醒源）。
@@ -873,6 +1117,42 @@ PYEOF
     fi
 
     echo "   指纹安装完成（控制中心/锁屏可用；只保留 1 个模板最快）"
+}
+
+# --- 息屏指纹解锁自动亮屏（手机式） ------------------------------------------
+# 目标：**息屏**（面板 DPMS Off）时用指纹解锁后，屏幕**自动点亮**并进桌面，不用再按
+#   一次电源键 —— 与手机一致。指纹不匹配时保持黑屏。
+# 为什么需要它：sheng-idle-lock / sheng-screen-toggle 会在息屏时先锁屏再关屏，锁屏
+#   对话框整段时间都武装着指纹；匹配成功时**对话框自己会解锁会话**，但面板仍是
+#   DPMS Off，用户看不到任何反馈。而指纹触摸**不是输入事件**，kylin-wlcom 不会因此
+#   唤醒面板（触摸/电源键才会），所以必须主动点屏。
+# 做法：用户级守护进程 sheng-fp-unlock-wake 监听会话总线 org.ukui.ScreenSaver 的
+#   `unlock` 信号（并用 GetLockState 每秒轮询兜底）；发现「会话已解锁 + 内屏黑着」
+#   （dpms==off 或 bl_power!=0）→ `kscreen-doctor -d on`。
+# 须在 setup_users 之后（要建用户级服务软链）。FP_UNLOCK_WAKE_ENV=0 可跳过。
+FP_UNLOCK_WAKE_ENV="${FP_UNLOCK_WAKE_ENV:-1}"
+
+install_fp_unlock_wake() {
+    local rootdir="$1" uname="$2"
+    echo "==> 配置息屏指纹解锁自动亮屏 (sheng-fp-unlock-wake)..."
+
+    # (1) 落地守护进程 + 用户级服务（显式安装保证权限位）。
+    install -Dm755 "$SCRIPT_DIR/system_files_openkylin/usr/local/bin/sheng-fp-unlock-wake" \
+        "$rootdir/usr/local/bin/sheng-fp-unlock-wake"
+    install -Dm644 "$SCRIPT_DIR/system_files_openkylin/etc/systemd/user/sheng-fp-unlock-wake.service" \
+        "$rootdir/etc/systemd/user/sheng-fp-unlock-wake.service"
+
+    # (2) 建用户级 enable 软链（构建期没有用户 session，systemctl --user enable 用不了）。
+    local udir="$rootdir/home/${uname}/.config/systemd/user"
+    local target
+    for target in default.target graphical-session.target; do
+        mkdir -p "$udir/${target}.wants"
+        ln -sf "/etc/systemd/user/sheng-fp-unlock-wake.service" \
+            "$udir/${target}.wants/sheng-fp-unlock-wake.service"
+    done
+    chown -R "${uname}:${uname}" "$rootdir/home/${uname}/.config" 2>/dev/null || true
+
+    echo "   息屏指纹解锁自动亮屏已配置"
 }
 
 # --- openKylin 系统更新修复（非 ostree 系统） -------------------------
@@ -1115,6 +1395,41 @@ for MODE in "${BOOTMODES[@]}"; do
         install_panel_brightness "$ROOTDIR" "$USER_NAME" || echo "WARN: 面板背光引擎步骤返回非零，继续构建" >&2
     fi
 
+    # 6a-6. 停用 peony「智能空间」IDM 服务（首次打开文件管理卡 10s + "无响应"）：
+    #       peony 首启同步等该服务连入缺失的 kylin-ai 后端 10s。须在 setup_users
+    #       之后（写 ~/.config/systemd/user 掩码软链）。见 install_peony_idm_fix
+    #       顶部注释。PEONY_IDM_FIX_ENV=0 可跳过。
+    if is_true "$PEONY_IDM_FIX_ENV"; then
+        install_peony_idm_fix "$ROOTDIR" "$USER_NAME" || echo "WARN: peony IDM 停用步骤返回非零，继续构建" >&2
+    fi
+
+    # 6a-7. ukui 触摸手势修补（可滚动目录里手指点不开文件夹 + 保留一指滚动）。
+    #       见 install_gesture_scroll_fix / tools/sheng-gesture-scroll-fix.sh 顶部注释。
+    #       GESTURE_SCROLL_FIX_ENV=0 可跳过。
+    if is_true "$GESTURE_SCROLL_FIX_ENV"; then
+        install_gesture_scroll_fix "$ROOTDIR" || echo "WARN: ukui 手势修补步骤返回非零，继续构建" >&2
+    fi
+
+    # 6a-8. 屏幕键盘「双击输入框弹出」+ 弹出预加载提速。见 install_osk_tap
+    #       顶部注释（含 fcitx5 两条启动入口的竞态陷阱）。OSK_TAP_ENV=0 可跳过。
+    if is_true "${OSK_TAP_ENV:-1}"; then
+        install_osk_tap "$ROOTDIR" || echo "WARN: 屏幕键盘双击步骤返回非零，继续构建" >&2
+    fi
+
+    # 6a-9. 息屏指纹解锁自动亮屏（手机式：息屏时指纹一碰 → 解锁并自动点亮屏幕）。
+    #       见 install_fp_unlock_wake 顶部注释。FP_UNLOCK_WAKE_ENV=0 可跳过。
+    if is_true "${FP_UNLOCK_WAKE_ENV:-1}"; then
+        install_fp_unlock_wake "$ROOTDIR" "$USER_NAME" || echo "WARN: 息屏指纹亮屏步骤返回非零，继续构建" >&2
+    fi
+
+    # 6a-10. 设备节点权限兜底：镜像里的 /dev/null 可能是 0755（应为 0666）。普通用户
+    #        写 /dev/null 会直接失败，从而让 `cmd >/dev/null 2>&1` 这类重定向**整条命令
+    #        被静默跳过**（本仓库多个 sheng-* 脚本都用这种写法）。这里纠正为 0666。
+    if [ -e "$ROOTDIR/dev/null" ]; then
+        chmod 0666 "$ROOTDIR/dev/null" 2>/dev/null || true
+        echo "==> /dev/null 权限纠正为 0666"
+    fi
+
     # 6b. Fontconfig: pin the generic families to Noto so linglong/DTK apps don't
     #     render with 华文彩云. openKylin ships 华文彩云 (STCaiyun, a hollow
     #     "outline" font) in the openkylin-fonts package, and keeps the generic
@@ -1202,7 +1517,15 @@ FONTCONF
     printf '%s\n' "$SYSTEM_TIMEZONE" > "$ROOTDIR/etc/timezone"
 
     # 7. Autologin + services + default graphical target (best effort).
-    setup_lightdm_autologin "$ROOTDIR" "$USER_NAME"
+    #    Autologin is ON by default (AUTOLOGIN_ENV=1), paired with
+    #    sheng-lock-on-login so the desktop preloads behind the lock screen;
+    #    AUTOLOGIN_ENV=0 leaves the plain ukui-greeter.
+    if is_true "${AUTOLOGIN_ENV:-1}"; then
+        setup_lightdm_autologin "$ROOTDIR" "$USER_NAME" \
+            || echo "WARN: autologin 步骤返回非零，继续构建" >&2
+        install_lock_on_login "$ROOTDIR" \
+            || echo "WARN: lock-on-login 步骤返回非零，继续构建" >&2
+    fi
     chroot "$ROOTDIR" systemctl enable NetworkManager 2>/dev/null || true
     chroot "$ROOTDIR" systemctl enable ssh  2>/dev/null || chroot "$ROOTDIR" systemctl enable sshd 2>/dev/null || true
     chroot "$ROOTDIR" systemctl set-default graphical.target 2>/dev/null || true
